@@ -90,6 +90,21 @@ func (f *Forge) ListProjects() ([]Project, error) {
 	return results, nil
 }
 
+// FindProjectByPath finds a project whose BaseRepo matches the given path.
+// Returns nil if no project matches.
+func (f *Forge) FindProjectByPath(path string) *Project {
+	projects, err := f.ListProjects()
+	if err != nil {
+		return nil
+	}
+	for _, p := range projects {
+		if p.BaseRepo == path {
+			return &p
+		}
+	}
+	return nil
+}
+
 // DeleteProject removes a project and all its slots/previews
 func (f *Forge) DeleteProject(id string) error {
 	_, err := f.db.Exec("DELETE FROM projects WHERE id = ?", id)
