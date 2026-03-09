@@ -1,5 +1,5 @@
-// Package forge manages isolated workspaces (slots) for agents,
-// with build tracking and preview deployment to pluggable targets.
+// Package forge manages deployment environments for agents,
+// with multi-repo workspaces, changeset grouping, and preview deployment.
 package forge
 
 import (
@@ -51,9 +51,16 @@ func Open(path string) (*Forge, error) {
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
+	// Create v1 schema first (for migration compatibility)
 	if _, err := db.Exec(schemaSQL); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
+		return nil, fmt.Errorf("init v1 schema: %w", err)
+	}
+
+	// Apply v2 schema (environments, changesets)
+	if _, err := db.Exec(schemaV2SQL); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("init v2 schema: %w", err)
 	}
 
 	return &Forge{db: db}, nil

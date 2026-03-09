@@ -1,6 +1,7 @@
 package forge
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,6 +63,35 @@ func gitHead(path string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func gitCommitHash(path string) (string, error) {
+	return gitHead(path)
+}
+
+func gitIsDirty(path string) (bool, error) {
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = path
+	out, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	return len(strings.TrimSpace(string(out))) > 0, nil
+}
+
+func gitAheadBehind(path string) (ahead, behind int, err error) {
+	cmd := exec.Command("git", "rev-list", "--left-right", "--count", "main...origin/main")
+	cmd.Dir = path
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, 0, err
+	}
+	parts := strings.Fields(string(out))
+	if len(parts) >= 2 {
+		fmt.Sscanf(parts[0], "%d", &ahead)
+		fmt.Sscanf(parts[1], "%d", &behind)
+	}
+	return ahead, behind, nil
 }
 
 func resetWorktree(path string) {

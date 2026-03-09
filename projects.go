@@ -16,6 +16,8 @@ type Project struct {
 	RepoURL       string // remote git URL
 	BuildCmd      string
 	ServeCmd      string
+	IsPrimary     bool  // true if this is the primary web project
+	PortOffset    int   // relative to environment base_port (-1 = not exposed)
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
