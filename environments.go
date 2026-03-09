@@ -40,7 +40,7 @@ var ErrNoEnvironments = fmt.Errorf("no available environments")
 var DefaultEnvDir = expandPath("~/life/repos/.envs")
 
 // DefaultProjects lists projects that go in each environment
-var DefaultProjects = []string{"inber", "bus", "si", "kayushkin", "agent-store", "forge", "model-store"}
+var DefaultProjects = []string{"inber", "bus", "si", "kayushkin", "agent-store", "forge", "model-store", "aiauth"}
 
 // Port allocations per environment (base_port + offset)
 var PortOffsets = map[string]int{
