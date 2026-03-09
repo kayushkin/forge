@@ -7,17 +7,8 @@ const schemaV2SQL = `
 -- PROJECTS (repos that can be in environments)
 -- ============================================
 
-CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY,                    -- "inber", "bus", "si", "kayushkin"
-    base_repo TEXT NOT NULL,                -- local git repo path (e.g., ~/life/repos/inber)
-    repo_url TEXT,                          -- remote git URL
-    build_cmd TEXT,                         -- "go build -o server ."
-    serve_cmd TEXT,                         -- "./server -port {port}"
-    is_primary INTEGER DEFAULT 0,           -- 1 if this is the primary project (inber)
-    port_offset INTEGER DEFAULT 0,          -- relative to env base_port
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-);
+-- The v1 projects table already exists, we just need to add new columns
+-- SQLite doesn't support IF NOT EXISTS for columns, so we handle this in Go code
 
 -- ============================================
 -- ENVIRONMENTS (deployment slots)
@@ -99,10 +90,14 @@ CREATE TABLE IF NOT EXISTS pull_requests (
 );
 
 -- ============================================
--- DEPLOYS (deployment history)
+-- DEPLOYS V2 (deployment history by environment)
 -- ============================================
 
-CREATE TABLE IF NOT EXISTS deploys (
+-- Note: v1 deploys table already exists with (project, target) keys.
+-- We keep both for backward compatibility during migration.
+-- New deploys use environment_id, old ones use project.
+
+CREATE TABLE IF NOT EXISTS deploys_v2 (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     environment_id INTEGER NOT NULL,
     target TEXT NOT NULL,                   -- "prod", "dev"
@@ -116,5 +111,17 @@ CREATE TABLE IF NOT EXISTS deploys (
     FOREIGN KEY (changeset_id) REFERENCES changesets(id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_deploys_env ON deploys(environment_id, target);
+CREATE INDEX IF NOT EXISTS idx_deploys_v2_env ON deploys_v2(environment_id, target);
 `
+
+// MigrateV2 adds v2 columns to existing tables
+func (f *Forge) MigrateV2() error {
+	// Add new columns to projects if they don't exist
+	if _, err := f.db.Exec(`ALTER TABLE projects ADD COLUMN is_primary INTEGER DEFAULT 0`); err != nil {
+		// Column might already exist, ignore error
+	}
+	if _, err := f.db.Exec(`ALTER TABLE projects ADD COLUMN port_offset INTEGER DEFAULT 0`); err != nil {
+		// Column might already exist, ignore error
+	}
+	return nil
+}

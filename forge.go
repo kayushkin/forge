@@ -63,7 +63,14 @@ func Open(path string) (*Forge, error) {
 		return nil, fmt.Errorf("init v2 schema: %w", err)
 	}
 
-	return &Forge{db: db}, nil
+	// Migrate existing tables with new columns
+	f := &Forge{db: db}
+	if err := f.MigrateV2(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate v2: %w", err)
+	}
+
+	return f, nil
 }
 
 // Close closes the database
