@@ -118,26 +118,28 @@ func (f *Forge) Acquire(projectID string, opts AcquireOpts) (*Slot, error) {
 	}, nil
 }
 
-// Release returns a slot to the pool
+// Release returns a slot to the pool.
+// The worktree is NOT reset here — changes are preserved for preview/review.
+// Reset happens on the next Acquire (clean slate for new work).
 func (f *Forge) Release(projectID string, slotID int) error {
-	// Reset the worktree
-	var path string
-	err := f.db.QueryRow(`SELECT path FROM slots WHERE project = ? AND id = ?`, projectID, slotID).Scan(&path)
-	if err != nil {
-		return err
-	}
-
 	// Stop any running preview
 	f.StopPreview(projectID, slotID)
 
-	// Reset worktree to default branch
-	resetWorktree(path)
-
-	_, err = f.db.Exec(`
+	_, err := f.db.Exec(`
 		UPDATE slots SET status = 'ready', agent_id = NULL, session_id = NULL, orchestrator = NULL, released_at = ?
 		WHERE project = ? AND id = ?
 	`, now(), projectID, slotID)
 	return err
+}
+
+// CleanSlot resets a slot's worktree to origin/main. Called on acquire or explicitly.
+func (f *Forge) CleanSlot(projectID string, slotID int) error {
+	var path string
+	if err := f.db.QueryRow(`SELECT path FROM slots WHERE project = ? AND id = ?`, projectID, slotID).Scan(&path); err != nil {
+		return err
+	}
+	resetWorktree(path)
+	return nil
 }
 
 // SlotStatus returns all slots for a project

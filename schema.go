@@ -133,4 +133,27 @@ CREATE TABLE IF NOT EXISTS builds (
 
 CREATE INDEX IF NOT EXISTS idx_builds_project ON builds(project, slot_id);
 CREATE INDEX IF NOT EXISTS idx_builds_status ON builds(status);
+
+-- ============================================
+-- DEPLOYS (deployment history)
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS deploys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    target TEXT NOT NULL,                   -- "prod", "dev-0", "dev-1", "dev-2"
+    commit_hash TEXT NOT NULL,
+    commit_message TEXT,
+    branch TEXT,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending, running, success, failed
+    error TEXT,
+    triggered_by TEXT,                      -- "slava", "brigid", etc.
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    reverted_at INTEGER,                    -- set when this deploy was reverted
+    FOREIGN KEY (project) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_deploys_project ON deploys(project, target);
+CREATE INDEX IF NOT EXISTS idx_deploys_status ON deploys(status);
 `
