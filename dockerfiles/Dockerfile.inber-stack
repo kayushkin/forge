@@ -1,0 +1,32 @@
+# Inber Stack - Full orchestration development environment
+# Includes: inber, bus, si, kayushkin.com
+
+FROM golang:1.22-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    nodejs \
+    npm \
+    git \
+    curl \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install just (task runner)
+RUN curl -fsSL https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+
+# Create repos directory
+WORKDIR /repos
+
+# Repos will be mounted at runtime:
+# /repos/inber
+# /repos/bus
+# /repos/si
+# /repos/kayushkin
+
+# Environment variables (overridden per slot)
+ENV INBER_ENV=0
+ENV PORT=9000
+
+# Default command: start all services
+CMD ["just", "dev"]

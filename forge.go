@@ -24,7 +24,7 @@ func DefaultPath() string {
 
 // Forge is the main handle
 type Forge struct {
-	db       *sql.DB
+	db         *sql.DB
 	containers *ContainerManager
 }
 
@@ -93,6 +93,11 @@ func Open(path string) (*Forge, error) {
 // Containers returns the container manager
 func (f *Forge) Containers() *ContainerManager {
 	return f.containers
+}
+
+// Close closes the database
+func (f *Forge) Close() error {
+	return f.db.Close()
 }
 
 // DB exposes the underlying database for advanced queries

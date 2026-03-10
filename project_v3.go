@@ -168,9 +168,14 @@ func (f *Forge) ListProjectSlotsV3(projectID string) ([]SlotV3, error) {
 	var slots []SlotV3
 	for rows.Next() {
 		var s SlotV3
-		if err := rows.Scan(&s.ID, &s.ProjectID, &s.SlotNum, &s.ContainerName, &s.Status, &s.ContainerID, &s.ImageID, &s.BasePort, &s.AgentID, &s.SessionID); err != nil {
+		var containerID, imageID, agentID, sessionID sql.NullString
+		if err := rows.Scan(&s.ID, &s.ProjectID, &s.SlotNum, &s.ContainerName, &s.Status, &containerID, &imageID, &s.BasePort, &agentID, &sessionID); err != nil {
 			return nil, err
 		}
+		s.ContainerID = containerID.String
+		s.ImageID = imageID.String
+		s.AgentID = agentID.String
+		s.SessionID = sessionID.String
 		slots = append(slots, s)
 	}
 	return slots, nil

@@ -1,0 +1,65 @@
+# Environment-level justfile for inber-stack
+# Coordinates builds and runs across all repos
+
+env := env_var_or_default("INBER_ENV", "0")
+base_port := if env == "0" { "9000" } else if env == "1" { "9100" } else { "9200" }
+bus_port := base_port + "10"
+si_port := base_port + "20"
+
+# Build all projects
+build:
+  cd /repos/inber && go build -o /usr/local/bin/inber ./cmd/inber
+  cd /repos/bus && go build -o /usr/local/bin/bus .
+  cd /repos/si && go build -o /usr/local/bin/si .
+  cd /repos/kayushkin && npm install && npm run build && go build -o /usr/local/bin/kayushkin-server .
+
+# Run tests for all projects
+test:
+  cd /repos/inber && go test ./...
+  cd /repos/bus && go test ./...
+  cd /repos/si && go test ./...
+  cd /repos/kayushkin && go test ./...
+
+# Start all services (development mode)
+dev: build
+  #!/bin/bash
+  set -e
+  
+  # Start bus
+  INBER_ENV={{env}} /usr/local/bin/bus -addr "127.0.0.1:{{bus_port}}" -db "/data/bus-{{env}}.db" -token "inber-bus-secret-2026" &
+  echo "Bus started on :{{bus_port}}"
+  sleep 2
+  
+  # Start si
+  INBER_ENV={{env}} SI_WS_ADDR=":{{si_port}}" SI_BUS_URL="http://127.0.0.1:{{bus_port}}" SI_BUS_TOKEN="inber-bus-secret-2026" /usr/local/bin/si &
+  echo "Si started on :{{si_port}}"
+  sleep 2
+  
+  # Start kayushkin
+  INBER_ENV={{env}} PORT={{base_port}} SI_WS_URL="ws://127.0.0.1:{{si_port}}/ws" /usr/local/bin/kayushkin-server -build /repos/kayushkin/build &
+  echo "Kayushkin started on :{{base_port}}"
+  
+  # Keep container running
+  wait
+
+# Start just the bus
+dev-bus:
+  INBER_ENV={{env}} /usr/local/bin/bus -addr "127.0.0.1:{{bus_port}}" -db "/data/bus-{{env}}.db" -token "inber-bus-secret-2026"
+
+# Start just si
+dev-si:
+  INBER_ENV={{env}} SI_WS_ADDR=":{{si_port}}" SI_BUS_URL="http://127.0.0.1:{{bus_port}}" SI_BUS_TOKEN="inber-bus-secret-2026" /usr/local/bin/si
+
+# Start just kayushkin
+dev-kayushkin:
+  INBER_ENV={{env}} PORT={{base_port}} SI_WS_URL="ws://127.0.0.1:{{si_port}}/ws" /usr/local/bin/kayushkin-server -build /repos/kayushkin/build
+
+# Shell into the container (for debugging)
+shell:
+  /bin/bash
+
+# Check service health
+health:
+  curl -s http://localhost:{{base_port}}/api/health || echo "Kayushkin not responding"
+  curl -s http://localhost:{{bus_port}}/api/health?token=inber-bus-secret-2026 || echo "Bus not responding"
+  curl -s http://localhost:{{si_port}}/api/status || echo "Si not responding"
