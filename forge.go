@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -23,7 +24,8 @@ func DefaultPath() string {
 
 // Forge is the main handle
 type Forge struct {
-	db *sql.DB
+	db       *sql.DB
+	containers *ContainerManager
 }
 
 // Open opens or creates the forge database
@@ -63,6 +65,12 @@ func Open(path string) (*Forge, error) {
 		return nil, fmt.Errorf("init v2 schema: %w", err)
 	}
 
+	// Apply v3 schema (containers)
+	if _, err := db.Exec(schemaV3SQL); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("init v3 schema: %w", err)
+	}
+
 	// Migrate existing tables with new columns
 	f := &Forge{db: db}
 	if err := f.MigrateV2(); err != nil {
@@ -70,12 +78,21 @@ func Open(path string) (*Forge, error) {
 		return nil, fmt.Errorf("migrate v2: %w", err)
 	}
 
+	// Migrate to v3 (container-based)
+	if err := f.MigrateV3(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate v3: %w", err)
+	}
+
+	// Initialize container manager
+	f.containers = NewContainerManager(f)
+
 	return f, nil
 }
 
-// Close closes the database
-func (f *Forge) Close() error {
-	return f.db.Close()
+// Containers returns the container manager
+func (f *Forge) Containers() *ContainerManager {
+	return f.containers
 }
 
 // DB exposes the underlying database for advanced queries
@@ -86,4 +103,16 @@ func (f *Forge) DB() *sql.DB {
 // now returns current unix timestamp
 func now() int64 {
 	return time.Now().Unix()
+}
+
+// expandHome expands ~ to home directory.
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }

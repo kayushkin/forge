@@ -125,3 +125,9 @@ func (f *Forge) MigrateV2() error {
 	}
 	return nil
 }
+
+// MigrateV3 creates v3 tables (no data migration needed, v3 is opt-in)
+func (f *Forge) MigrateV3() error {
+	// Tables are created in Open(), this is for any column additions
+	return nil
+}
