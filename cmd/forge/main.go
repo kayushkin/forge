@@ -69,6 +69,8 @@ func main() {
 		}
 	case "init":
 		initProject(f)
+	case "api":
+		runAPI(f, args)
 	case "status":
 		slotStatus(f)
 	default:
