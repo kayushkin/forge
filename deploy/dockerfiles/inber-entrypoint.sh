@@ -7,6 +7,13 @@ DB="${BUS_AGENT_DB:-/data/agents.db}"
 mkdir -p /root/.config/inber
 echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" > /root/.config/inber/.env
 
+# Copy agent-store DB if bundled (from build)
+if [ -f /etc/inber/agents.db ] && [ ! -f /root/.config/agent-store/agents.db ]; then
+    mkdir -p /root/.config/agent-store
+    cp /etc/inber/agents.db /root/.config/agent-store/agents.db
+    echo "[inber-entrypoint] Seeded agent-store from bundled DB"
+fi
+
 # Seed inber backend in registry DB
 sqlite3 "$DB" <<'SQL'
 CREATE TABLE IF NOT EXISTS backends (

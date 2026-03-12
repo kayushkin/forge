@@ -28,6 +28,7 @@ COPY --from=agent-builder /bus-agent /usr/local/bin/bus-agent
 # Copy inber agent definitions
 COPY inber/agents.json /etc/inber/agents.json
 COPY inber/agents/ /etc/inber/agents/
+COPY inber/deploy/agents-seed.db /etc/inber/agents.db
 
 # Symlink agents where bus-agent sync expects them
 RUN mkdir -p /root/life/repos/inber && \
