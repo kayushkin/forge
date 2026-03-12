@@ -51,6 +51,7 @@ services:
       - kayushkin-data:/data
     environment:
       - PORT=8080
+      - HOST=0.0.0.0
       - BUS_URL=http://bus:8100
       - BUS_TOKEN=${BUS_TOKEN:-forge-env-{{.Env}}}
     depends_on:
