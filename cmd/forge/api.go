@@ -57,6 +57,35 @@ func runAPI(f *forge.Forge, args []string) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(data)
 	})
+	mux.HandleFunc("/api/forge/routes", func(w http.ResponseWriter, r *http.Request) {
+		cors(w)
+		if r.Method == "OPTIONS" {
+			return
+		}
+		if r.Method == "GET" {
+			data := getRoutes()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(data)
+			return
+		}
+		if r.Method == "POST" {
+			var req routeUpdateRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, `{"error":"invalid json"}`, 400)
+				return
+			}
+			result, err := updateRoute(req)
+			w.Header().Set("Content-Type", "application/json")
+			if err != nil {
+				w.WriteHeader(500)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			json.NewEncoder(w).Encode(result)
+			return
+		}
+		http.Error(w, "method not allowed", 405)
+	})
 	mux.HandleFunc("/api/forge/deploy", func(w http.ResponseWriter, r *http.Request) {
 		cors(w)
 		if r.Method == "OPTIONS" {
@@ -265,6 +294,265 @@ type deployEntry struct {
 	Action    string `json:"action"`
 	Detail    string `json:"detail"`
 	Timestamp int64  `json:"timestamp"`
+}
+
+// --- Routes ---
+
+// routeInfo describes a single env var routing a service connection.
+type routeInfo struct {
+	Env     string   `json:"env"`     // "prod" or "env-0"
+	Service string   `json:"service"` // service name
+	EnvVar  string   `json:"env_var"` // env var name
+	Value   string   `json:"value"`   // current value
+	Proto   string   `json:"proto"`   // http, ws, cli
+	Target  string   `json:"target"`  // what it points to
+	Options []string `json:"options"` // available reroute targets
+}
+
+type routeUpdateRequest struct {
+	Env     string `json:"env"`     // "prod" or "env-0"
+	Service string `json:"service"` // which service to update
+	EnvVar  string `json:"env_var"` // which env var
+	Value   string `json:"value"`   // new value
+}
+
+type routeUpdateResult struct {
+	OK       bool   `json:"ok"`
+	Previous string `json:"previous"`
+	Current  string `json:"current"`
+	Message  string `json:"message"`
+}
+
+// routableEnvVars defines which env vars can be rerouted and their possible targets.
+// Each entry: env var → list of option generators.
+type routeOption struct {
+	label string
+	value string
+}
+
+func routeOptionsForVar(envVar string, envNum int) []routeOption {
+	switch envVar {
+	case "SI_WS_URL":
+		opts := []routeOption{
+			{"prod si (8090)", "ws://127.0.0.1:8090/ws"},
+		}
+		for i := 0; i < 3; i++ {
+			opts = append(opts, routeOption{
+				fmt.Sprintf("env-%d si (%d)", i, 9000+i*100+20),
+				fmt.Sprintf("ws://127.0.0.1:%d/ws", 9000+i*100+20),
+			})
+		}
+		return opts
+	case "SI_BUS_URL", "BUS_URL":
+		opts := []routeOption{
+			{"prod bus (8100)", "http://127.0.0.1:8100"},
+		}
+		for i := 0; i < 3; i++ {
+			opts = append(opts, routeOption{
+				fmt.Sprintf("env-%d bus (%d)", i, 9000+i*100+10),
+				fmt.Sprintf("http://127.0.0.1:%d", 9000+i*100+10),
+			})
+		}
+		return opts
+	case "LOGSTACK_URL":
+		opts := []routeOption{
+			{"prod logstack (8088)", "http://127.0.0.1:8088"},
+		}
+		for i := 0; i < 3; i++ {
+			opts = append(opts, routeOption{
+				fmt.Sprintf("env-%d logstack (%d)", i, 9000+i*100+30),
+				fmt.Sprintf("http://127.0.0.1:%d", 9000+i*100+30),
+			})
+		}
+		return opts
+	case "BUS_AGENT_API_URL":
+		return []routeOption{
+			{"WSL bus-agent (8101)", "http://127.0.0.1:8101"},
+		}
+	case "FORGE_API_URL":
+		return []routeOption{
+			{"forge-api (8150)", "http://127.0.0.1:8150"},
+		}
+	}
+	return nil
+}
+
+func getRoutes() []routeInfo {
+	home, _ := os.UserHomeDir()
+	var routes []routeInfo
+
+	// Prod routes from systemd service files
+	serviceFiles := map[string]string{
+		"kayushkin": filepath.Join(home, ".config/systemd/user/kayushkin.service"),
+		"si":        filepath.Join(home, ".config/systemd/user/si.service"),
+		"bus":       filepath.Join(home, ".config/systemd/user/bus.service"),
+		"logstack":  filepath.Join(home, ".config/systemd/user/logstack.service"),
+	}
+
+	// Which env vars per service are routable
+	routableVars := map[string][]string{
+		"kayushkin": {"SI_WS_URL", "LOGSTACK_URL", "BUS_URL", "BUS_AGENT_API_URL", "FORGE_API_URL"},
+		"si":        {"SI_BUS_URL", "LOGSTACK_URL"},
+	}
+
+	for svc, path := range serviceFiles {
+		vars, ok := routableVars[svc]
+		if !ok {
+			continue
+		}
+		envMap := parseSystemdEnv(path)
+		for _, v := range vars {
+			val := envMap[v]
+			// Fall back to code defaults if not in service file
+			if val == "" {
+				switch v {
+				case "SI_WS_URL":
+					val = "ws://127.0.0.1:8090/ws"
+				case "LOGSTACK_URL":
+					val = "http://127.0.0.1:8088"
+				case "BUS_URL", "SI_BUS_URL":
+					val = "http://127.0.0.1:8100"
+				case "BUS_AGENT_API_URL":
+					val = "http://127.0.0.1:8101"
+				case "FORGE_API_URL":
+					val = "http://127.0.0.1:8150"
+				}
+			}
+
+			opts := routeOptionsForVar(v, -1)
+			optStrs := make([]string, len(opts))
+			for i, o := range opts {
+				optStrs[i] = o.label + "|" + o.value
+			}
+
+			routes = append(routes, routeInfo{
+				Env:     "prod",
+				Service: svc,
+				EnvVar:  v,
+				Value:   val,
+				Options: optStrs,
+			})
+		}
+	}
+
+	// Staging routes from compose env vars — Docker internal names, not routable the same way
+	// Staging services use Docker DNS (bus, si, logstack) so rerouting isn't as useful
+	// but we still expose them for visibility
+	for i := 0; i < 3; i++ {
+		envDir := filepath.Join(home, "forge", "envs", fmt.Sprintf("env-%d", i))
+		composePath := filepath.Join(envDir, "docker-compose.yml")
+		composeEnv := parseComposeEnvVars(composePath)
+
+		for svc, envMap := range composeEnv {
+			for k, v := range envMap {
+				// Only show routing-related vars
+				if !isRoutingVar(k) {
+					continue
+				}
+				routes = append(routes, routeInfo{
+					Env:     fmt.Sprintf("env-%d", i),
+					Service: svc,
+					EnvVar:  k,
+					Value:   v,
+				})
+			}
+		}
+	}
+
+	return routes
+}
+
+func isRoutingVar(name string) bool {
+	switch name {
+	case "SI_WS_URL", "SI_BUS_URL", "BUS_URL", "LOGSTACK_URL",
+		"BUS_AGENT_API_URL", "FORGE_API_URL", "BUS_TOKEN", "SI_BUS_TOKEN":
+		return true
+	}
+	return false
+}
+
+// parseSystemdEnv reads Environment= lines from a systemd service file.
+func parseSystemdEnv(path string) map[string]string {
+	result := make(map[string]string)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return result
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Environment=") {
+			kv := strings.TrimPrefix(line, "Environment=")
+			parts := strings.SplitN(kv, "=", 2)
+			if len(parts) == 2 {
+				result[parts[0]] = parts[1]
+			}
+		}
+	}
+	return result
+}
+
+func updateRoute(req routeUpdateRequest) (*routeUpdateResult, error) {
+	if req.Env != "prod" {
+		return nil, fmt.Errorf("rerouting staging services not yet supported (use docker compose)")
+	}
+	if req.Service == "" || req.EnvVar == "" || req.Value == "" {
+		return nil, fmt.Errorf("service, env_var, and value are required")
+	}
+
+	home, _ := os.UserHomeDir()
+	serviceFile := filepath.Join(home, ".config/systemd/user", req.Service+".service")
+
+	data, err := os.ReadFile(serviceFile)
+	if err != nil {
+		return nil, fmt.Errorf("read service file: %w", err)
+	}
+
+	content := string(data)
+	lines := strings.Split(content, "\n")
+	var newLines []string
+	previous := ""
+	found := false
+	envLine := fmt.Sprintf("Environment=%s=%s", req.EnvVar, req.Value)
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Environment="+req.EnvVar+"=") {
+			previous = strings.TrimPrefix(trimmed, "Environment="+req.EnvVar+"=")
+			newLines = append(newLines, envLine)
+			found = true
+		} else {
+			newLines = append(newLines, line)
+		}
+	}
+
+	// If the env var wasn't in the file, add it in the [Service] section
+	if !found {
+		var finalLines []string
+		for _, line := range newLines {
+			finalLines = append(finalLines, line)
+			if strings.TrimSpace(line) == "[Service]" {
+				finalLines = append(finalLines, envLine)
+			}
+		}
+		newLines = finalLines
+	}
+
+	if err := os.WriteFile(serviceFile, []byte(strings.Join(newLines, "\n")), 0644); err != nil {
+		return nil, fmt.Errorf("write service file: %w", err)
+	}
+
+	// Reload and restart
+	exec.Command("systemctl", "--user", "daemon-reload").Run()
+	if err := exec.Command("systemctl", "--user", "restart", req.Service).Run(); err != nil {
+		return nil, fmt.Errorf("restart %s: %w", req.Service, err)
+	}
+
+	return &routeUpdateResult{
+		OK:       true,
+		Previous: previous,
+		Current:  req.Value,
+		Message:  fmt.Sprintf("Updated %s on %s, service restarted", req.EnvVar, req.Service),
+	}, nil
 }
 
 // --- Topology ---
