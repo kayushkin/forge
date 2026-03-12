@@ -1,0 +1,19 @@
+# Kayushkin.com - Go server + Vite frontend
+FROM golang:1.24-bookworm AS go-builder
+
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=1 go build -o /kayushkin-server .
+
+FROM node:20-bookworm-slim AS frontend-builder
+
+WORKDIR /src
+COPY . .
+RUN npm ci && npm run build
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates sqlite3 && rm -rf /var/lib/apt/lists/*
+COPY --from=go-builder /kayushkin-server /usr/local/bin/kayushkin-server
+COPY --from=frontend-builder /src/build /srv/build
+ENTRYPOINT ["/usr/local/bin/kayushkin-server"]
+CMD ["-build", "/srv/build"]

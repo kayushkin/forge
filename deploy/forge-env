@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# forge-env — manage staging environments on Linode
+# Usage: forge-env <command> [env-num]
+#   start <N>   — build & start environment N (0-2)
+#   stop <N>    — stop environment N
+#   restart <N> — rebuild & restart environment N
+#   status      — show all environments
+#   logs <N>    — tail logs for environment N
+#   ps <N>      — show containers for environment N
+#   build <N>   — build images without starting
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+FORGE_DIR="$(dirname "$SCRIPT_DIR")"
+REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
+ENVS_DIR="${ENVS_DIR:-$HOME/forge/envs}"
+TEMPLATE="$SCRIPT_DIR/templates/docker-compose.yml.tmpl"
+
+# Port layout per env:
+#   env-0: 9000 (web), 9010 (bus), 9020 (si)
+#   env-1: 9100 (web), 9110 (bus), 9120 (si)
+#   env-2: 9200 (web), 9210 (bus), 9220 (si)
+port_base() { echo $(( 9000 + $1 * 100 )); }
+port_bus()  { echo $(( 9000 + $1 * 100 + 10 )); }
+port_si()   { echo $(( 9000 + $1 * 100 + 20 )); }
+port_max()  { echo $(( 9000 + $1 * 100 + 29 )); }
+
+generate_compose() {
+    local env=$1
+    local dir="$ENVS_DIR/env-$env"
+    mkdir -p "$dir"
+
+    sed \
+        -e "s/{{.Env}}/$env/g" \
+        -e "s/{{.BasePort}}/$(port_base $env)/g" \
+        -e "s/{{.BusPort}}/$(port_bus $env)/g" \
+        -e "s/{{.SiPort}}/$(port_si $env)/g" \
+        -e "s/{{.WebPort}}/$(port_base $env)/g" \
+        -e "s/{{.MaxPort}}/$(port_max $env)/g" \
+        "$TEMPLATE" > "$dir/docker-compose.yml"
+
+    # Write .env file
+    cat > "$dir/.env" <<EOF
+REPOS_DIR=$REPOS_DIR
+FORGE_DIR=$FORGE_DIR
+BUS_TOKEN=forge-env-$env
+EOF
+
+    echo "$dir"
+}
+
+cmd_start() {
+    local env=$1
+    local dir
+    dir=$(generate_compose "$env")
+    echo "Starting env-$env (web=$(port_base $env), bus=$(port_bus $env), si=$(port_si $env))"
+    cd "$dir" && docker compose up -d --build
+    echo "✓ env-$env running at http://localhost:$(port_base $env)"
+}
+
+cmd_stop() {
+    local env=$1
+    local dir="$ENVS_DIR/env-$env"
+    if [ -f "$dir/docker-compose.yml" ]; then
+        echo "Stopping env-$env..."
+        cd "$dir" && docker compose down
+        echo "✓ env-$env stopped"
+    else
+        echo "env-$env not initialized"
+    fi
+}
+
+cmd_restart() {
+    local env=$1
+    cmd_stop "$env" 2>/dev/null || true
+    cmd_start "$env"
+}
+
+cmd_build() {
+    local env=$1
+    local dir
+    dir=$(generate_compose "$env")
+    echo "Building env-$env..."
+    cd "$dir" && docker compose build
+    echo "✓ env-$env images built"
+}
+
+cmd_status() {
+    echo "=== Forge Environments ==="
+    for i in 0 1 2; do
+        local dir="$ENVS_DIR/env-$i"
+        if [ -f "$dir/docker-compose.yml" ]; then
+            local running
+            running=$(cd "$dir" && docker compose ps --format '{{.Name}} {{.Status}}' 2>/dev/null | head -5)
+            if [ -n "$running" ]; then
+                echo ""
+                echo "env-$i (web=$(port_base $i), bus=$(port_bus $i), si=$(port_si $i)):"
+                echo "$running" | sed 's/^/  /'
+            else
+                echo "env-$i: stopped"
+            fi
+        else
+            echo "env-$i: not initialized"
+        fi
+    done
+}
+
+cmd_logs() {
+    local env=$1
+    local dir="$ENVS_DIR/env-$env"
+    cd "$dir" && docker compose logs -f --tail 50
+}
+
+cmd_ps() {
+    local env=$1
+    local dir="$ENVS_DIR/env-$env"
+    cd "$dir" && docker compose ps
+}
+
+# --- Main ---
+
+if [ $# -lt 1 ]; then
+    echo "Usage: forge-env <start|stop|restart|build|status|logs|ps> [env-num]"
+    exit 1
+fi
+
+CMD=$1
+ENV_NUM=${2:-}
+
+case "$CMD" in
+    status)
+        cmd_status
+        ;;
+    start|stop|restart|build|logs|ps)
+        if [ -z "$ENV_NUM" ]; then
+            echo "Error: env number required (0-2)"
+            exit 1
+        fi
+        if [ "$ENV_NUM" -lt 0 ] || [ "$ENV_NUM" -gt 2 ]; then
+            echo "Error: env must be 0-2"
+            exit 1
+        fi
+        "cmd_$CMD" "$ENV_NUM"
+        ;;
+    *)
+        echo "Unknown command: $CMD"
+        exit 1
+        ;;
+esac

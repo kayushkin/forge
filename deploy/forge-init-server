@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# forge-init-server — one-time setup for forge environments on the server
+# Run this ON the server (or via SSH)
+
+set -euo pipefail
+
+FORGE_HOME="$HOME/forge"
+REPOS_DIR="$HOME/repos"
+ENVS_DIR="$FORGE_HOME/envs"
+
+echo "=== Forge Server Init ==="
+
+# Create directory structure
+mkdir -p "$REPOS_DIR" "$ENVS_DIR" "$FORGE_HOME"
+
+# Clone repos (or pull if exists)
+clone_or_pull() {
+    local name=$1
+    local url=$2
+    local dir="$REPOS_DIR/$name"
+    if [ -d "$dir/.git" ]; then
+        echo "  $name: pulling..."
+        cd "$dir" && git pull --ff-only
+    else
+        echo "  $name: cloning..."
+        git clone "$url" "$dir"
+    fi
+}
+
+echo ""
+echo "Setting up repos..."
+clone_or_pull bus     "https://github.com/kayushkin/bus.git"
+clone_or_pull si      "https://github.com/kayushkin/si.git"
+clone_or_pull kayushkin.com "https://github.com/kayushkin/kayushkin.git"
+clone_or_pull forge   "https://github.com/kayushkin/forge.git"
+
+# Create env directories
+for i in 0 1 2; do
+    mkdir -p "$ENVS_DIR/env-$i"
+done
+
+echo ""
+echo "=== Directory layout ==="
+echo "$REPOS_DIR/"
+ls -1 "$REPOS_DIR/"
+echo ""
+echo "$ENVS_DIR/"
+ls -1 "$ENVS_DIR/"
+
+echo ""
+echo "✓ Server initialized."
+echo "  Repos: $REPOS_DIR"
+echo "  Envs:  $ENVS_DIR"
+echo ""
+echo "Next: copy forge deploy scripts, then run:"
+echo "  REPOS_DIR=$REPOS_DIR forge-env start 0"

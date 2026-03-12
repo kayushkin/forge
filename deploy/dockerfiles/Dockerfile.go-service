@@ -1,0 +1,13 @@
+# Generic Go service builder
+# Build arg: SERVICE_DIR (path within /src to build)
+FROM golang:1.24-bookworm AS builder
+
+ARG SERVICE_DIR=.
+WORKDIR /src
+COPY . .
+RUN cd ${SERVICE_DIR} && CGO_ENABLED=1 go build -o /app .
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates sqlite3 && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app /usr/local/bin/app
+ENTRYPOINT ["/usr/local/bin/app"]
