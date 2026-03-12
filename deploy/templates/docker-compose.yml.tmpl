@@ -40,6 +40,38 @@ services:
       bus:
         condition: service_healthy
 
+  logstack:
+    build:
+      context: ${REPOS_DIR}/logstack
+      dockerfile: ${FORGE_DIR}/deploy/dockerfiles/Dockerfile.logstack
+    restart: unless-stopped
+    ports:
+      - "{{.LogstackPort}}:8088"
+    volumes:
+      - logstack-data:/data
+    environment:
+      - LOGSTACK_PORT=8088
+    depends_on:
+      bus:
+        condition: service_healthy
+
+  inber:
+    build:
+      context: ${REPOS_DIR}
+      dockerfile: ${FORGE_DIR}/deploy/dockerfiles/Dockerfile.inber
+    restart: unless-stopped
+    volumes:
+      - inber-data:/data
+    environment:
+      - BUS_URL=http://bus:8100
+      - BUS_TOKEN=${BUS_TOKEN:-forge-env-{{.Env}}}
+      - BUS_CONSUMER=bus-agent-env-{{.Env}}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    command: ["-bus", "http://bus:8100", "-token", "${BUS_TOKEN:-forge-env-{{.Env}}}", "-consumer", "bus-agent-env-{{.Env}}", "-db", "/data/agents.db"]
+    depends_on:
+      bus:
+        condition: service_healthy
+
   kayushkin:
     build:
       context: ${REPOS_DIR}/kayushkin.com
@@ -57,6 +89,7 @@ services:
       - BUS_TOKEN=${BUS_TOKEN:-forge-env-{{.Env}}}
       - KAYUSHKIN_PASSPHRASE=${KAYUSHKIN_PASSPHRASE:-forge-dev-{{.Env}}}
       - SI_WS_URL=ws://si:8120/ws
+      - LOGSTACK_URL=http://logstack:8088
     depends_on:
       bus:
         condition: service_healthy
@@ -64,3 +97,5 @@ services:
 volumes:
   bus-data:
   kayushkin-data:
+  logstack-data:
+  inber-data:

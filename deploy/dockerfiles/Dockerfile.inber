@@ -1,0 +1,37 @@
+# Builds both inber CLI and bus-agent in one container.
+# Build context: ${REPOS_DIR} (parent dir containing inber/, bus/, forge/)
+
+FROM golang:1.24-bookworm AS inber-builder
+WORKDIR /src
+COPY inber/go.mod inber/go.sum ./
+RUN go mod download
+COPY inber/ .
+RUN CGO_ENABLED=1 go build -o /inber ./cmd/inber
+
+FROM golang:1.24-bookworm AS agent-builder
+WORKDIR /src
+COPY bus/go.mod bus/go.sum ./
+RUN go mod download
+COPY bus/ .
+RUN CGO_ENABLED=1 go build -o /bus-agent ./cmd/bus-agent
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates sqlite3 git && rm -rf /var/lib/apt/lists/*
+
+COPY --from=inber-builder /inber /usr/local/bin/inber
+COPY --from=agent-builder /bus-agent /usr/local/bin/bus-agent
+
+# Copy inber agent definitions
+COPY inber/agents.json /etc/inber/agents.json
+COPY inber/agents/ /etc/inber/agents/
+
+# Symlink agents where bus-agent sync expects them
+RUN mkdir -p /root/life/repos/inber && \
+    ln -sf /etc/inber/agents.json /root/life/repos/inber/agents.json && \
+    ln -sf /etc/inber/agents /root/life/repos/inber/agents
+
+COPY forge/deploy/dockerfiles/inber-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+WORKDIR /data
+ENTRYPOINT ["/entrypoint.sh"]

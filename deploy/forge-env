@@ -17,16 +17,17 @@ REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
 ENVS_DIR="${ENVS_DIR:-$HOME/forge/envs}"
 TEMPLATE="$SCRIPT_DIR/templates/docker-compose.yml.tmpl"
 
-SERVICES="bus si kayushkin.com"
+SERVICES="bus si kayushkin.com logstack inber forge"
 
 # Port layout per env:
-#   env-0: 9000 (web), 9010 (bus), 9020 (si)
-#   env-1: 9100 (web), 9110 (bus), 9120 (si)
-#   env-2: 9200 (web), 9210 (bus), 9220 (si)
-port_base() { echo $(( 9000 + $1 * 100 )); }
-port_bus()  { echo $(( 9000 + $1 * 100 + 10 )); }
-port_si()   { echo $(( 9000 + $1 * 100 + 20 )); }
-port_max()  { echo $(( 9000 + $1 * 100 + 29 )); }
+#   env-0: 9000 (web), 9010 (bus), 9020 (si), 9030 (logstack)
+#   env-1: 9100 (web), 9110 (bus), 9120 (si), 9130 (logstack)
+#   env-2: 9200 (web), 9210 (bus), 9220 (si), 9230 (logstack)
+port_base()     { echo $(( 9000 + $1 * 100 )); }
+port_bus()      { echo $(( 9000 + $1 * 100 + 10 )); }
+port_si()       { echo $(( 9000 + $1 * 100 + 20 )); }
+port_logstack() { echo $(( 9000 + $1 * 100 + 30 )); }
+port_max()      { echo $(( 9000 + $1 * 100 + 39 )); }
 
 # Each env gets its own repo directory at $ENVS_DIR/env-N/repos/
 env_repos_dir() { echo "$ENVS_DIR/env-$1/repos"; }
@@ -67,6 +68,7 @@ generate_compose() {
         -e "s/{{.BasePort}}/$(port_base $env)/g" \
         -e "s/{{.BusPort}}/$(port_bus $env)/g" \
         -e "s/{{.SiPort}}/$(port_si $env)/g" \
+        -e "s/{{.LogstackPort}}/$(port_logstack $env)/g" \
         -e "s/{{.WebPort}}/$(port_base $env)/g" \
         -e "s/{{.MaxPort}}/$(port_max $env)/g" \
         "$TEMPLATE" > "$dir/docker-compose.yml"
@@ -76,6 +78,7 @@ generate_compose() {
 REPOS_DIR=$env_repos
 FORGE_DIR=$FORGE_DIR
 BUS_TOKEN=forge-env-$env
+ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 EOF
 
     echo "$dir"
@@ -92,7 +95,7 @@ cmd_start() {
     local env=$1
     local dir
     dir=$(generate_compose "$env")
-    echo "Starting env-$env (web=$(port_base $env), bus=$(port_bus $env), si=$(port_si $env))"
+    echo "Starting env-$env (web=$(port_base $env), bus=$(port_bus $env), si=$(port_si $env), logstack=$(port_logstack $env))"
     cd "$dir" && docker compose up -d --build
     echo "✓ env-$env running at http://localhost:$(port_base $env)"
 }
