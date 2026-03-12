@@ -7,7 +7,7 @@
 #   status      — show all environments
 #   logs <N>    — tail logs for environment N
 #   ps <N>      — show containers for environment N
-#   build <N>   — build images without starting
+#   init <N>    — initialize per-env repo clones (run once)
 
 set -euo pipefail
 
@@ -16,6 +16,8 @@ FORGE_DIR="$(dirname "$SCRIPT_DIR")"
 REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
 ENVS_DIR="${ENVS_DIR:-$HOME/forge/envs}"
 TEMPLATE="$SCRIPT_DIR/templates/docker-compose.yml.tmpl"
+
+SERVICES="bus si kayushkin.com"
 
 # Port layout per env:
 #   env-0: 9000 (web), 9010 (bus), 9020 (si)
@@ -26,10 +28,39 @@ port_bus()  { echo $(( 9000 + $1 * 100 + 10 )); }
 port_si()   { echo $(( 9000 + $1 * 100 + 20 )); }
 port_max()  { echo $(( 9000 + $1 * 100 + 29 )); }
 
+# Each env gets its own repo directory at $ENVS_DIR/env-N/repos/
+env_repos_dir() { echo "$ENVS_DIR/env-$1/repos"; }
+
+init_env_repos() {
+    local env=$1
+    local env_repos
+    env_repos=$(env_repos_dir "$env")
+    mkdir -p "$env_repos"
+    
+    for svc in $SERVICES; do
+        local src="$REPOS_DIR/$svc"
+        local dst="$env_repos/$svc"
+        
+        if [ ! -d "$dst/.git" ]; then
+            if [ -d "$src/.git" ]; then
+                echo "  Cloning $svc for env-$env..."
+                git clone --shared "$src" "$dst"
+            else
+                echo "  WARNING: $src not found, skipping $svc"
+            fi
+        fi
+    done
+}
+
 generate_compose() {
     local env=$1
     local dir="$ENVS_DIR/env-$env"
+    local env_repos
+    env_repos=$(env_repos_dir "$env")
     mkdir -p "$dir"
+    
+    # Init repos if needed
+    init_env_repos "$env"
 
     sed \
         -e "s/{{.Env}}/$env/g" \
@@ -40,14 +71,21 @@ generate_compose() {
         -e "s/{{.MaxPort}}/$(port_max $env)/g" \
         "$TEMPLATE" > "$dir/docker-compose.yml"
 
-    # Write .env file
+    # Point REPOS_DIR at this env's isolated repos
     cat > "$dir/.env" <<EOF
-REPOS_DIR=$REPOS_DIR
+REPOS_DIR=$env_repos
 FORGE_DIR=$FORGE_DIR
 BUS_TOKEN=forge-env-$env
 EOF
 
     echo "$dir"
+}
+
+cmd_init() {
+    local env=$1
+    echo "Initializing repos for env-$env..."
+    init_env_repos "$env"
+    echo "✓ env-$env repos ready at $(env_repos_dir $env)"
 }
 
 cmd_start() {
@@ -77,15 +115,6 @@ cmd_restart() {
     cmd_start "$env"
 }
 
-cmd_build() {
-    local env=$1
-    local dir
-    dir=$(generate_compose "$env")
-    echo "Building env-$env..."
-    cd "$dir" && docker compose build
-    echo "✓ env-$env images built"
-}
-
 cmd_status() {
     echo "=== Forge Environments ==="
     for i in 0 1 2; do
@@ -97,6 +126,18 @@ cmd_status() {
                 echo ""
                 echo "env-$i (web=$(port_base $i), bus=$(port_bus $i), si=$(port_si $i)):"
                 echo "$running" | sed 's/^/  /'
+                # Show branch info
+                local env_repos
+                env_repos=$(env_repos_dir "$i")
+                if [ -d "$env_repos" ]; then
+                    for svc in $SERVICES; do
+                        if [ -d "$env_repos/$svc/.git" ]; then
+                            local branch
+                            branch=$(cd "$env_repos/$svc" && git branch --show-current 2>/dev/null || echo "?")
+                            echo "  $svc: $branch"
+                        fi
+                    done
+                fi
             else
                 echo "env-$i: stopped"
             fi
@@ -121,7 +162,7 @@ cmd_ps() {
 # --- Main ---
 
 if [ $# -lt 1 ]; then
-    echo "Usage: forge-env <start|stop|restart|build|status|logs|ps> [env-num]"
+    echo "Usage: forge-env <start|stop|restart|init|status|logs|ps> [env-num]"
     exit 1
 fi
 
@@ -132,7 +173,7 @@ case "$CMD" in
     status)
         cmd_status
         ;;
-    start|stop|restart|build|logs|ps)
+    start|stop|restart|init|logs|ps)
         if [ -z "$ENV_NUM" ]; then
             echo "Error: env number required (0-2)"
             exit 1

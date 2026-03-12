@@ -214,18 +214,21 @@ CHECKEOF
         return 1
     fi
     
+    # Each env has its own repo clones at $ENVS_DIR/env-N/repos/
+    local env_repos="$ENVS_DIR/env-$slot/repos"
+    
     # Build the checkout commands
     local checkout_cmds=""
     for rb in "${repo_branches[@]}"; do
         local repo="${rb%%:*}"
         local branch="${rb##*:}"
         if [ "$repo" != "$rb" ]; then
-            checkout_cmds+="echo \"  $repo → $branch\" && cd $REPOS_DIR/$repo && git fetch origin && git checkout $branch && git pull origin $branch --ff-only 2>/dev/null || true; "
+            checkout_cmds+="echo \"  $repo → $branch\" && cd $env_repos/$repo && git fetch origin && git checkout $branch && git pull origin $branch --ff-only 2>/dev/null || true; "
         fi
     done
     
     if [ -z "$checkout_cmds" ]; then
-        checkout_cmds="for repo in bus si kayushkin.com; do cd $REPOS_DIR/\$repo && git pull --ff-only 2>/dev/null || true; done"
+        checkout_cmds="for repo in bus si kayushkin.com; do cd $env_repos/\$repo && git fetch origin && git pull --ff-only 2>/dev/null || true; done"
     fi
     
     echo "Deploying to slot-$slot..."
