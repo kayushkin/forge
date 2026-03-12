@@ -1,18 +1,24 @@
 # Kayushkin.com - Go server + Vite frontend
-FROM golang:1.24-bookworm AS go-builder
+# Note: mangastack.go and podcaststack.go are separate binaries with their own go.mod files.
+# This Dockerfile builds only the main kayushkin-server (main.go).
 
+FROM golang:1.24-bookworm AS go-builder
 WORKDIR /src
-COPY . .
-RUN CGO_ENABLED=1 go build -o /kayushkin-server .
+COPY go.mod go.sum ./
+RUN go mod download
+COPY main.go .
+RUN CGO_ENABLED=0 go build -o /kayushkin-server .
 
 FROM node:20-bookworm-slim AS frontend-builder
-
 WORKDIR /src
-COPY . .
-RUN npm ci && npm run build
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY index.html vite.config.ts tsconfig.json ./
+COPY src/ src/
+RUN npm run build
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates sqlite3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=go-builder /kayushkin-server /usr/local/bin/kayushkin-server
 COPY --from=frontend-builder /src/build /srv/build
 ENTRYPOINT ["/usr/local/bin/kayushkin-server"]

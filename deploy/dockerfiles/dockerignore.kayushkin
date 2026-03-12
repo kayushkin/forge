@@ -1,0 +1,13 @@
+node_modules
+build
+library
+logs
+test-results
+*.service
+kayushkin-server
+kayushkin
+mangastack-bin
+podcaststack-bin
+server
+main
+.inber
