@@ -11,6 +11,9 @@
 
 set -euo pipefail
 
+# Source server env for API keys etc.
+[ -f "$HOME/bin/.env" ] && source "$HOME/bin/.env"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FORGE_DIR="$(dirname "$SCRIPT_DIR")"
 REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
@@ -91,6 +94,36 @@ cmd_init() {
     echo "✓ env-$env repos ready at $(env_repos_dir $env)"
 }
 
+cmd_pull() {
+    echo "Pulling latest for all shared repos..."
+    local ssh_cmd="ssh -i $HOME/.ssh/github_deploy -o StrictHostKeyChecking=no"
+    for svc in $SERVICES; do
+        local repo="$REPOS_DIR/$svc"
+        if [ -d "$repo/.git" ]; then
+            echo "  $svc..."
+            (cd "$repo" && GIT_SSH_COMMAND="$ssh_cmd" git pull --ff-only -q 2>/dev/null || echo "    ⚠ pull failed for $svc")
+        fi
+    done
+    echo "✓ shared repos updated"
+}
+
+cmd_sync() {
+    # Pull shared repos, then update per-env clones
+    local env=$1
+    cmd_pull
+    local env_repos
+    env_repos=$(env_repos_dir "$env")
+    echo "Syncing env-$env repos..."
+    for svc in $SERVICES; do
+        local dst="$env_repos/$svc"
+        if [ -d "$dst/.git" ]; then
+            echo "  $svc..."
+            (cd "$dst" && git fetch origin -q && git reset --hard origin/main -q 2>/dev/null || echo "    ⚠ sync failed for $svc")
+        fi
+    done
+    echo "✓ env-$env repos synced"
+}
+
 cmd_start() {
     local env=$1
     local dir
@@ -115,6 +148,7 @@ cmd_stop() {
 cmd_restart() {
     local env=$1
     cmd_stop "$env" 2>/dev/null || true
+    cmd_sync "$env"
     cmd_start "$env"
 }
 
@@ -176,7 +210,11 @@ case "$CMD" in
     status)
         cmd_status
         ;;
-    start|stop|restart|init|logs|ps)
+    pull)
+        cmd_pull
+        exit 0
+        ;;
+    start|stop|restart|init|sync|logs|ps)
         if [ -z "$ENV_NUM" ]; then
             echo "Error: env number required (0-2)"
             exit 1
