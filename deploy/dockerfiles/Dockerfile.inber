@@ -4,25 +4,20 @@
 
 FROM golang:1.24-bookworm AS inber-builder
 WORKDIR /src/inber
-COPY inber/go.mod inber/go.sum ./
-# Copy sibling deps for replace directives
 COPY aiauth/ /src/aiauth/
 COPY model-store/ /src/model-store/
 COPY agent-store/ /src/agent-store/
 COPY forge/ /src/forge/
-RUN go mod download
 COPY inber/ .
-RUN CGO_ENABLED=1 go build -o /inber ./cmd/inber
+RUN go mod download && CGO_ENABLED=1 go build -o /inber ./cmd/inber
 
 FROM golang:1.24-bookworm AS agent-builder
 WORKDIR /src/bus
-COPY bus/go.mod bus/go.sum ./
 COPY aiauth/ /src/aiauth/
 COPY model-store/ /src/model-store/
 COPY forge/ /src/forge/
-RUN go mod download
 COPY bus/ .
-RUN CGO_ENABLED=1 go build -o /bus-agent ./cmd/bus-agent
+RUN go mod download && CGO_ENABLED=1 go build -o /bus-agent ./cmd/bus-agent
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates sqlite3 git && rm -rf /var/lib/apt/lists/*
