@@ -315,9 +315,28 @@ type connDef struct {
 	proto  string
 }
 
-var serviceDefinitions = []serviceDef{
+// Prod services — only things that run on the Linode server
+var prodServiceDefs = []serviceDef{
+	{name: "nginx", intPort: 443, connects: []connDef{
+		{target: "kayushkin", envVar: "", proto: "http"},
+	}},
 	{name: "kayushkin", intPort: 8080, connects: []connDef{
-		{target: "bus-agent", envVar: "BUS_AGENT_API_URL", proto: "http"},
+		{target: "si", envVar: "SI_WS_URL", proto: "ws"},
+		{target: "logstack", envVar: "LOGSTACK_URL", proto: "http"},
+		{target: "bus", envVar: "BUS_URL", proto: "http"},
+		{target: "forge-api", envVar: "FORGE_API_URL", proto: "http"},
+	}},
+	{name: "bus", intPort: 8100, connects: []connDef{}},
+	{name: "si", intPort: 8120, connects: []connDef{
+		{target: "bus", envVar: "SI_BUS_URL", proto: "http"},
+	}},
+	{name: "logstack", intPort: 8088, connects: []connDef{}},
+	{name: "forge-api", intPort: 8150, connects: []connDef{}},
+}
+
+// Staging services — run inside Docker Compose per env
+var stagingServiceDefs = []serviceDef{
+	{name: "kayushkin", intPort: 8080, connects: []connDef{
 		{target: "si", envVar: "SI_WS_URL", proto: "ws"},
 		{target: "logstack", envVar: "LOGSTACK_URL", proto: "http"},
 		{target: "bus", envVar: "BUS_URL", proto: "http"},
@@ -327,11 +346,9 @@ var serviceDefinitions = []serviceDef{
 		{target: "bus", envVar: "SI_BUS_URL", proto: "http"},
 	}},
 	{name: "logstack", intPort: 8088, connects: []connDef{}},
-	{name: "bus-agent", intPort: 8101, connects: []connDef{
+	{name: "inber", intPort: 0, connects: []connDef{
 		{target: "bus", envVar: "BUS_URL", proto: "http"},
-		{target: "inber", envVar: "", proto: "cli"},
 	}},
-	{name: "inber", intPort: 0, connects: []connDef{}},
 }
 
 func getTopology(f *forge.Forge) topologyResponse {
@@ -339,14 +356,17 @@ func getTopology(f *forge.Forge) topologyResponse {
 
 	// --- Prod topology ---
 	prod := topologyEnv{Name: "prod"}
-	for _, sd := range serviceDefinitions {
+	for _, sd := range prodServiceDefs {
+		nodeType := "service"
+		if sd.name == "nginx" {
+			nodeType = "external"
+		}
 		node := topoNode{
 			ID:   "prod-" + sd.name,
 			Name: sd.name,
-			Type: "service",
+			Type: nodeType,
 			Port: sd.intPort,
 		}
-		// Check if prod process is running
 		if sd.intPort > 0 {
 			node.Status = checkPortStatus(sd.intPort)
 		}
@@ -359,28 +379,19 @@ func getTopology(f *forge.Forge) topologyResponse {
 				EnvVar: c.envVar,
 				Proto:  c.proto,
 			}
-			// Resolve default prod values
 			switch c.envVar {
-			case "BUS_AGENT_API_URL":
-				link.Value = "http://127.0.0.1:8101"
 			case "SI_WS_URL":
 				link.Value = "ws://127.0.0.1:8090/ws"
 			case "LOGSTACK_URL":
 				link.Value = "http://127.0.0.1:8088"
 			case "BUS_URL", "SI_BUS_URL":
 				link.Value = "http://127.0.0.1:8100"
+			case "FORGE_API_URL":
+				link.Value = "http://127.0.0.1:8150"
 			}
 			prod.Links = append(prod.Links, link)
 		}
 	}
-	// Add nginx → kayushkin
-	prod.Nodes = append(prod.Nodes, topoNode{
-		ID: "prod-nginx", Name: "nginx", Type: "external",
-		Port: 443, Status: checkPortStatus(443),
-	})
-	prod.Links = append(prod.Links, topoLink{
-		From: "prod-nginx", To: "prod-kayushkin", Proto: "http", Value: "proxy_pass :8080",
-	})
 
 	// --- Staging topology (per env) ---
 	slots, _ := f.ListProjectSlotsV3(defaultProject)
@@ -405,30 +416,26 @@ func getTopology(f *forge.Forge) topologyResponse {
 		// Get env vars from compose if available
 		composeEnv := parseComposeEnvVars(composePath)
 
-		stagingServices := []serviceDef{
-			{name: "kayushkin", intPort: portBase, connects: []connDef{
-				{target: "si", envVar: "SI_WS_URL", proto: "ws"},
-				{target: "logstack", envVar: "LOGSTACK_URL", proto: "http"},
-				{target: "bus", envVar: "BUS_URL", proto: "http"},
-			}},
-			{name: "bus", intPort: portBase + 10, connects: []connDef{}},
-			{name: "si", intPort: portBase + 20, connects: []connDef{
-				{target: "bus", envVar: "SI_BUS_URL", proto: "http"},
-			}},
-			{name: "logstack", intPort: portBase + 30, connects: []connDef{}},
-			{name: "inber", intPort: 0, connects: []connDef{
-				{target: "bus", envVar: "BUS_URL", proto: "http"},
-			}},
-		}
-
 		envPrefix := fmt.Sprintf("env%d-", s.SlotNum)
-		for _, sd := range stagingServices {
+		for _, sd := range stagingServiceDefs {
 			cs, ok := containerStatus[sd.name]
+			// Map internal ports to external env-specific ports
+			extPort := 0
+			switch sd.name {
+			case "kayushkin":
+				extPort = portBase
+			case "bus":
+				extPort = portBase + 10
+			case "si":
+				extPort = portBase + 20
+			case "logstack":
+				extPort = portBase + 30
+			}
 			node := topoNode{
 				ID:   envPrefix + sd.name,
 				Name: sd.name,
 				Type: "service",
-				Port: sd.intPort,
+				Port: extPort,
 			}
 			if ok {
 				node.Status = cs.Status
