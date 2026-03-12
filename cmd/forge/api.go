@@ -327,7 +327,7 @@ var prodServiceDefs = []serviceDef{
 		{target: "forge-api", envVar: "FORGE_API_URL", proto: "http"},
 	}},
 	{name: "bus", intPort: 8100, connects: []connDef{}},
-	{name: "si", intPort: 8120, connects: []connDef{
+	{name: "si", intPort: 8090, connects: []connDef{
 		{target: "bus", envVar: "SI_BUS_URL", proto: "http"},
 	}},
 	{name: "logstack", intPort: 8088, connects: []connDef{}},
