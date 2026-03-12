@@ -24,6 +24,9 @@ VALUES (
 );
 SQL
 
+# Add project column if missing (migration)
+sqlite3 "$DB" "ALTER TABLE agents ADD COLUMN project TEXT DEFAULT '';" 2>/dev/null || true
+
 echo "[inber-entrypoint] Starting bus-agent..."
 exec bus-agent \
     -bus "${BUS_URL:-http://bus:8100}" \
