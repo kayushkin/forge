@@ -60,7 +60,7 @@ generate_compose() {
     mkdir -p "$dir"
     
     # Init repos if needed
-    init_env_repos "$env"
+    init_env_repos "$env" >&2
 
     sed \
         -e "s/{{.Env}}/$env/g" \
