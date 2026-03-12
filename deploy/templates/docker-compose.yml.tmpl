@@ -52,8 +52,10 @@ services:
     environment:
       - PORT=8080
       - HOST=0.0.0.0
+      - BUILD_PATH=/srv/build
       - BUS_URL=http://bus:8100
       - BUS_TOKEN=${BUS_TOKEN:-forge-env-{{.Env}}}
+      - KAYUSHKIN_PASSPHRASE=${KAYUSHKIN_PASSPHRASE:-forge-dev-{{.Env}}}
     depends_on:
       bus:
         condition: service_healthy

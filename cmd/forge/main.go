@@ -59,7 +59,14 @@ func main() {
 			log.Fatalf("unknown slot command: %s", args[0])
 		}
 	case "deploy":
-		prodDeploy(args)
+		if len(args) == 0 {
+			autoDeploy(f)
+		} else if args[0] == "prod" {
+			prodDeploy(args[1:])
+		} else {
+			// Legacy: forge deploy <service> → prod deploy
+			prodDeploy(args)
+		}
 	case "init":
 		initProject(f)
 	case "status":
@@ -72,17 +79,20 @@ func main() {
 func printUsage() {
 	fmt.Println(`forge — deployment management
 
+Deploy (auto-detect from cwd):
+  forge deploy                           Auto-detect slot from cwd, deploy current repo
+
 Slot commands (staging environments):
   forge slot                             Show slot status
   forge slot open <change> <agent>       Claim a slot for a change (prints slot number)
   forge slot join <N> <agent>            Join an existing slot
   forge slot leave <N> <agent>           Leave a slot
   forge slot close <N>                   Release a slot
-  forge slot deploy <N> <agent> [repo:branch...]  Deploy to a slot
+  forge slot deploy <N> <agent> [repo:branch...]  Deploy to a slot (explicit)
   forge slot log [N]                     Show activity log
 
 Production:
-  forge deploy <service|all>             Deploy to production
+  forge deploy prod <service|all>        Deploy to production
 
 Setup:
   forge init                             Initialize project and slots in DB`)
@@ -254,9 +264,6 @@ func slotDeploy(f *forge.Forge, args []string) {
 	}
 	cmdArgs = append(cmdArgs, repoBranches...)
 	cmd := exec.Command("bash", cmdArgs...)
-	if len(repoBranches) > 0 {
-		cmd.Args = append(cmd.Args, repoBranches...)
-	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -301,6 +308,104 @@ func slotLog(f *forge.Forge, args []string) {
 		}
 		fmt.Printf("%s slot-%d %-8s %s%s\n", t, e.SlotNum, e.Action, e.AgentName, detail)
 	}
+}
+
+// autoDeploy detects the slot and repo from the current working directory.
+// Expects cwd to be inside ~/forge/envs/env-N/repos/<repo>/
+func autoDeploy(f *forge.Forge) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("getwd: %v", err)
+	}
+
+	// Extract env number from path: .../envs/env-N/...
+	slotNum, repo := parseEnvPath(cwd)
+	if slotNum < 0 {
+		log.Fatalf("not inside a slot repo. Expected path like ~/forge/envs/env-N/repos/<repo>/\ncwd: %s", cwd)
+	}
+
+	// Agent name for logging — use system user
+	agentName := os.Getenv("USER")
+	if agentName == "" {
+		agentName = "agent"
+	}
+
+	slot, err := f.GetSlotByNum(defaultProject, slotNum)
+	if err != nil {
+		log.Fatalf("slot %d not found: %v", slotNum, err)
+	}
+
+	if slot.Status != "active" {
+		log.Fatalf("slot-%d is not active. Run 'forge slot open <change> <agent>' first.", slotNum)
+	}
+
+	// Get current branch of the repo
+	branch := ""
+	if repo != "" {
+		repoDir := cwd
+		// Navigate to repo root if we're in a subdirectory
+		if idx := strings.Index(cwd, "/repos/"+repo); idx >= 0 {
+			repoDir = cwd[:idx+len("/repos/")+len(repo)]
+		}
+		branchCmd := exec.Command("git", "-C", repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+		out, err := branchCmd.Output()
+		if err == nil {
+			branch = strings.TrimSpace(string(out))
+		}
+	}
+
+	fmt.Printf("Deploying: slot-%d, repo=%s, branch=%s\n", slotNum, repo, branch)
+
+	// Build repo:branch arg for the deploy script
+	var repoBranches []string
+	if repo != "" && branch != "" {
+		repoBranches = []string{repo + ":" + branch}
+	}
+
+	// Call the shell deploy script
+	cmdArgs := []string{
+		os.ExpandEnv("$HOME/life/repos/forge/deploy/forge-staging"),
+		"deploy-only", fmt.Sprint(slotNum), agentName,
+	}
+	cmdArgs = append(cmdArgs, repoBranches...)
+	cmd := exec.Command("bash", cmdArgs...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("deploy failed: %v", err)
+	}
+
+	detail := "repo=" + repo
+	if branch != "" {
+		detail += " branch=" + branch
+	}
+	f.LogSlotDeploy(slot.ID, agentName, detail)
+	fmt.Printf("\n✅ slot-%d deployed: http://%d.dev.kayushkin.com\n", slotNum, slotNum)
+}
+
+// parseEnvPath extracts the env number and repo name from a path like
+// .../envs/env-2/repos/kayushkin.com/src/...
+// Returns (-1, "") if not in an env path.
+func parseEnvPath(path string) (int, string) {
+	// Find "envs/env-N" or "env-N/repos"
+	parts := strings.Split(path, "/")
+	for i, p := range parts {
+		if !strings.HasPrefix(p, "env-") {
+			continue
+		}
+		numStr := strings.TrimPrefix(p, "env-")
+		num, err := strconv.Atoi(numStr)
+		if err != nil {
+			continue
+		}
+		// Look for repos/<name> after env-N
+		repo := ""
+		if i+2 < len(parts) && parts[i+1] == "repos" {
+			repo = parts[i+2]
+		}
+		return num, repo
+	}
+	return -1, ""
 }
 
 func prodDeploy(args []string) {
