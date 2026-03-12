@@ -9,7 +9,7 @@ COPY model-store/ /src/model-store/
 COPY agent-store/ /src/agent-store/
 COPY forge/ /src/forge/
 COPY inber/ .
-RUN go mod download && CGO_ENABLED=1 go build -o /inber ./cmd/inber
+RUN GOFLAGS=-mod=mod CGO_ENABLED=1 go build -o /inber ./cmd/inber
 
 FROM golang:1.24-bookworm AS agent-builder
 WORKDIR /src/bus
@@ -17,7 +17,7 @@ COPY aiauth/ /src/aiauth/
 COPY model-store/ /src/model-store/
 COPY forge/ /src/forge/
 COPY bus/ .
-RUN go mod download && CGO_ENABLED=1 go build -o /bus-agent ./cmd/bus-agent
+RUN GOFLAGS=-mod=mod CGO_ENABLED=1 go build -o /bus-agent ./cmd/bus-agent
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates sqlite3 git && rm -rf /var/lib/apt/lists/*
