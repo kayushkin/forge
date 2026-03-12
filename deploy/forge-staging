@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# forge-staging — manage staging environments remotely
+#
+# Usage:
+#   forge-staging claim <agent-name>       — claim next available env, prints env number
+#   forge-staging release <N>              — release env N
+#   forge-staging deploy <N> [repo:branch] — pull branch & rebuild env N
+#   forge-staging status                   — show all envs and who owns them
+#   forge-staging url <N>                  — print the env URL
+#
+# Designed to be called by agents (inber or openclaw) via SSH.
+
+set -euo pipefail
+
+ENV_FILE="$HOME/bin/.env"
+if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; fi
+
+REMOTE_USER="kayushkincom"
+REMOTE_HOST="kayushkin.com"
+SSH="sshpass -p $KAYUSHKINCOM_PASS ssh -o StrictHostKeyChecking=no $REMOTE_USER@$REMOTE_HOST"
+
+LOCK_DIR="/home/kayushkincom/forge/locks"
+REPOS_DIR="/home/kayushkincom/repos"
+FORGE_DIR="/home/kayushkincom/repos/forge"
+ENVS_DIR="/home/kayushkincom/forge/envs"
+
+remote() { $SSH "$1"; }
+
+cmd_status() {
+    $SSH bash <<STATUSEOF
+mkdir -p $LOCK_DIR
+for i in 0 1 2; do
+    lock="$LOCK_DIR/env-\${i}.lock"
+    if [ -f "\$lock" ]; then
+        owner=\$(cat "\$lock")
+        echo "env-\${i}: claimed by \$owner"
+    else
+        echo "env-\${i}: available"
+    fi
+done
+STATUSEOF
+}
+
+cmd_claim() {
+    local agent=$1
+    local result
+    result=$($SSH bash <<CLAIMEOF
+mkdir -p $LOCK_DIR
+for i in 0 1 2; do
+    lock="$LOCK_DIR/env-\${i}.lock"
+    if [ ! -f "\$lock" ]; then
+        echo "$agent" > "\$lock"
+        echo "\$i"
+        exit 0
+    fi
+done
+echo "NONE"
+exit 1
+CLAIMEOF
+    ) || true
+    
+    if [ "$result" = "NONE" ] || [ -z "$result" ]; then
+        echo "ERROR: no available environments" >&2
+        return 1
+    fi
+    
+    echo "$result"
+}
+
+cmd_release() {
+    local env=$1
+    remote "rm -f $LOCK_DIR/env-$env.lock"
+    echo "env-$env released"
+}
+
+cmd_url() {
+    local env=$1
+    echo "http://$env.dev.kayushkin.com"
+}
+
+cmd_deploy() {
+    local env=$1
+    shift
+    
+    # Parse optional repo:branch args
+    # e.g. "kayushkin.com:feature-x" or "bus:fix-thing si:main"
+    local repo_branches=("$@")
+    
+    remote "
+        export PATH=\$HOME/.local/share/mise/shims:\$PATH
+        
+        # If specific repos/branches given, check them out
+        $(for rb in "${repo_branches[@]}"; do
+            repo="${rb%%:*}"
+            branch="${rb##*:}"
+            if [ "$repo" != "$rb" ]; then
+                echo "cd $REPOS_DIR/$repo && git fetch origin && git checkout $branch && git pull origin $branch --ff-only 2>/dev/null || true"
+            fi
+        done)
+        
+        # Pull latest on all repos (if no specific branches, just pull main)
+        $(if [ ${#repo_branches[@]} -eq 0 ]; then
+            echo "for repo in bus si kayushkin.com; do cd $REPOS_DIR/\$repo && git pull --ff-only 2>/dev/null || true; done"
+        fi)
+        
+        # Rebuild the environment
+        export REPOS_DIR=$REPOS_DIR
+        export FORGE_DIR=$FORGE_DIR
+        export ENVS_DIR=$ENVS_DIR
+        cd $FORGE_DIR/deploy
+        bash forge-env restart $env
+    "
+    
+    echo ""
+    echo "✅ env-$env deployed: http://$env.dev.kayushkin.com"
+}
+
+# --- Main ---
+
+if [ $# -lt 1 ]; then
+    cat <<USAGE
+Usage: forge-staging <command> [args]
+
+Commands:
+  status                       Show all envs and who owns them
+  claim <agent-name>           Claim next available env (prints env number)
+  release <N>                  Release env N
+  deploy <N> [repo:branch...]  Deploy to env N (optionally checkout specific branches)
+  url <N>                      Print env URL
+
+Examples:
+  forge-staging claim kayushkin-agent
+  forge-staging deploy 0 kayushkin.com:feature-new-page
+  forge-staging deploy 1 bus:fix-api si:update-adapter
+  forge-staging release 0
+USAGE
+    exit 1
+fi
+
+CMD=$1; shift
+
+case "$CMD" in
+    status) cmd_status ;;
+    claim)
+        [ $# -lt 1 ] && { echo "Usage: forge-staging claim <agent-name>" >&2; exit 1; }
+        cmd_claim "$1" ;;
+    release)
+        [ $# -lt 1 ] && { echo "Usage: forge-staging release <N>" >&2; exit 1; }
+        cmd_release "$1" ;;
+    deploy)
+        [ $# -lt 1 ] && { echo "Usage: forge-staging deploy <N> [repo:branch...]" >&2; exit 1; }
+        cmd_deploy "$@" ;;
+    url)
+        [ $# -lt 1 ] && { echo "Usage: forge-staging url <N>" >&2; exit 1; }
+        cmd_url "$1" ;;
+    *) echo "Unknown command: $CMD" >&2; exit 1 ;;
+esac
