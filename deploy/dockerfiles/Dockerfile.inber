@@ -1,16 +1,25 @@
 # Builds both inber CLI and bus-agent in one container.
-# Build context: ${REPOS_DIR} (parent dir containing inber/, bus/, forge/)
+# Build context: ${REPOS_DIR} (parent dir containing all repos)
+# Repos needed: inber, bus, aiauth, model-store, agent-store, forge
 
 FROM golang:1.24-bookworm AS inber-builder
-WORKDIR /src
+WORKDIR /src/inber
 COPY inber/go.mod inber/go.sum ./
+# Copy sibling deps for replace directives
+COPY aiauth/ /src/aiauth/
+COPY model-store/ /src/model-store/
+COPY agent-store/ /src/agent-store/
+COPY forge/ /src/forge/
 RUN go mod download
 COPY inber/ .
 RUN CGO_ENABLED=1 go build -o /inber ./cmd/inber
 
 FROM golang:1.24-bookworm AS agent-builder
-WORKDIR /src
+WORKDIR /src/bus
 COPY bus/go.mod bus/go.sum ./
+COPY aiauth/ /src/aiauth/
+COPY model-store/ /src/model-store/
+COPY forge/ /src/forge/
 RUN go mod download
 COPY bus/ .
 RUN CGO_ENABLED=1 go build -o /bus-agent ./cmd/bus-agent

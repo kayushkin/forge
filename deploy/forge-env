@@ -17,7 +17,7 @@ REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
 ENVS_DIR="${ENVS_DIR:-$HOME/forge/envs}"
 TEMPLATE="$SCRIPT_DIR/templates/docker-compose.yml.tmpl"
 
-SERVICES="bus si kayushkin.com logstack inber forge"
+SERVICES="bus si kayushkin.com logstack inber forge aiauth model-store agent-store"
 
 # Port layout per env:
 #   env-0: 9000 (web), 9010 (bus), 9020 (si), 9030 (logstack)
