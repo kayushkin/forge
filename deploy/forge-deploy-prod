@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# forge-deploy-prod — deploy services to production on kayushkin.com
+#
+# Usage:
+#   forge-deploy-prod <service|all>
+#   forge-deploy-prod kayushkin        # deploy just kayushkin
+#   forge-deploy-prod all              # deploy everything
+#
+# Services: kayushkin, bus, si, logstack, bookstack, downloadstack, videostack
+#
+# How it works:
+#   1. Pull latest code from GitHub on the server
+#   2. Build the binary on the server
+#   3. Back up the current binary
+#   4. Swap in the new binary
+#   5. Restart the systemd service
+#   6. Health check — if it fails, rollback
+#
+# Requires: SSH access to kayushkin.com (uses ~/bin/.env for credentials)
+
+set -euo pipefail
+
+# --- Config ---
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$HOME/bin/.env"
+REMOTE_USER="kayushkincom"
+REMOTE_HOST="kayushkin.com"
+
+if [ -f "$ENV_FILE" ]; then
+    source "$ENV_FILE"
+fi
+
+SSH_CMD="sshpass -p $KAYUSHKINCOM_PASS ssh -o StrictHostKeyChecking=no $REMOTE_USER@$REMOTE_HOST"
+
+# Remote PATH needs mise shims for go
+REMOTE_PATH_PREFIX="export PATH=\$HOME/.local/share/mise/shims:\$PATH"
+
+# Service definitions: name|repo_dir|build_cmd|binary_src|binary_dst|service_name|service_type|health_url
+# service_type: system (sudo systemctl) or user (systemctl --user)
+declare -A SERVICES
+SERVICES=(
+    [kayushkin]="kayushkin.com|go build -o kayushkin-server .|kayushkin-server|/home/kayushkincom/bin/kayushkin-server|kayushkin|system|http://localhost:8080/api/health"
+    [bus]="bus|cd cmd/bus && go build -o ../../bus .|bus|/home/kayushkincom/bin/bus|bus|user|http://localhost:8100/stats?token=inber-bus-secret-2026"
+    [si]="si|cd cmd/si && go build -o ../../si .|si|/home/kayushkincom/bin/si|si|user|"
+    [logstack]="logstack|go build -o logstack ./cmd/logstack|logstack|/home/kayushkincom/bin/logstack|logstack|user|http://localhost:8088/api/v1/stats"
+    [bookstack]="bookstack|go build -o bookstack .|bookstack|/home/kayushkincom/bookstack/bookstack|bookstack|system|"
+    [downloadstack]="downloadstack|go build -o downloadstack .|downloadstack|/home/kayushkincom/downloadstack/downloadstack|downloadstack|system|"
+    [videostack]="videostack|go build -o videostack .|videostack|/home/kayushkincom/videostack/videostack|videostack|system|"
+)
+
+# --- Functions ---
+
+log() { echo "[$(date '+%H:%M:%S')] $*"; }
+err() { echo "[$(date '+%H:%M:%S')] ❌ $*" >&2; }
+ok()  { echo "[$(date '+%H:%M:%S')] ✅ $*"; }
+
+remote() {
+    $SSH_CMD "export PATH=\$HOME/.local/share/mise/shims:\$PATH; $1"
+}
+
+deploy_service() {
+    local name=$1
+    local config="${SERVICES[$name]}"
+    
+    IFS='|' read -r repo_dir build_cmd binary_name binary_dst service_name service_type health_url <<< "$config"
+    
+    local repo_path="/home/kayushkincom/repos/$repo_dir"
+    local backup_path="${binary_dst}.bak"
+    
+    log "Deploying $name..."
+    
+    # 1. Ensure repo exists, pull latest
+    log "  Pulling latest code..."
+    remote "
+        if [ ! -d '$repo_path/.git' ]; then
+            echo 'Repo not found at $repo_path, cloning...'
+            git clone git@github.com:kayushkin/$repo_dir.git '$repo_path' || exit 1
+        fi
+        cd '$repo_path' && git pull --ff-only || exit 1
+        echo 'At commit: '
+        git log --oneline -1
+    " || { err "$name: git pull failed"; return 1; }
+    
+    # 2. Build
+    log "  Building..."
+    remote "cd '$repo_path' && $build_cmd" || { err "$name: build failed"; return 1; }
+    
+    # 3. Stop service
+    log "  Stopping service..."
+    if [ "$service_type" = "user" ]; then
+        remote "systemctl --user stop $service_name 2>/dev/null; pkill -f '$binary_dst' 2>/dev/null" || true
+    else
+        remote "sudo systemctl stop $service_name 2>/dev/null; pkill -f '$binary_dst' 2>/dev/null" || true
+    fi
+    sleep 2
+    
+    # 4. Backup + swap binary
+    log "  Swapping binary..."
+    remote "
+        if [ -f '$binary_dst' ]; then
+            cp '$binary_dst' '$backup_path'
+        fi
+        cp '$repo_path/$binary_name' '$binary_dst'
+    " || { err "$name: binary swap failed"; return 1; }
+    
+    # 5. Start service
+    log "  Starting service..."
+    if [ "$service_type" = "user" ]; then
+        remote "systemctl --user start $service_name" || { err "$name: start failed"; }
+    else
+        remote "sudo systemctl start $service_name 2>/dev/null" || {
+            err "$name: sudo start failed — may need manual restart"
+            return 1
+        }
+    fi
+    
+    # 6. Health check (if URL provided)
+    if [ -n "$health_url" ]; then
+        log "  Health checking..."
+        sleep 2
+        local healthy=false
+        for i in 1 2 3; do
+            if remote "curl -sf '$health_url' > /dev/null 2>&1"; then
+                healthy=true
+                break
+            fi
+            sleep 2
+        done
+        
+        if [ "$healthy" = true ]; then
+            ok "$name deployed successfully"
+        else
+            err "$name health check failed — rolling back"
+            if [ "$service_type" = "user" ]; then
+                remote "systemctl --user stop $service_name 2>/dev/null" || true
+            else
+                remote "sudo systemctl stop $service_name 2>/dev/null" || true
+            fi
+            sleep 1
+            remote "if [ -f '$backup_path' ]; then cp '$backup_path' '$binary_dst'; fi"
+            if [ "$service_type" = "user" ]; then
+                remote "systemctl --user start $service_name"
+            else
+                remote "sudo systemctl start $service_name 2>/dev/null"
+            fi
+            return 1
+        fi
+    else
+        # No health URL — just check if process is running after 2s
+        sleep 2
+        if remote "pgrep -f '$binary_dst' > /dev/null 2>&1 || systemctl --user is-active $service_name > /dev/null 2>&1"; then
+            ok "$name deployed successfully"
+        else
+            err "$name may not be running — check manually"
+        fi
+    fi
+}
+
+# --- Main ---
+
+if [ $# -lt 1 ]; then
+    echo "Usage: forge-deploy-prod <service|all>"
+    echo ""
+    echo "Services: ${!SERVICES[*]}"
+    exit 1
+fi
+
+TARGET=$1
+
+if [ "$TARGET" = "all" ]; then
+    log "=== Deploying all services to prod ==="
+    failed=()
+    # Deploy in dependency order
+    for svc in bus si logstack kayushkin bookstack downloadstack videostack; do
+        deploy_service "$svc" || failed+=("$svc")
+    done
+    echo ""
+    if [ ${#failed[@]} -eq 0 ]; then
+        ok "All services deployed successfully!"
+    else
+        err "Failed services: ${failed[*]}"
+        exit 1
+    fi
+elif [ -n "${SERVICES[$TARGET]+x}" ]; then
+    deploy_service "$TARGET"
+else
+    err "Unknown service: $TARGET"
+    echo "Available: ${!SERVICES[*]}"
+    exit 1
+fi
