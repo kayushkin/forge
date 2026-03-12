@@ -84,6 +84,12 @@ func Open(path string) (*Forge, error) {
 		return nil, fmt.Errorf("migrate v3: %w", err)
 	}
 
+	// Initialize slot schema
+	if err := f.InitSlotSchema(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("init slot schema: %w", err)
+	}
+
 	// Initialize container manager
 	f.containers = NewContainerManager(f)
 
@@ -120,4 +126,9 @@ func expandHome(path string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
+}
+
+// SlotCommit is a v2 stub (deprecated).
+func (f *Forge) SlotCommit(project string, slotID int, msg string) error {
+	return nil
 }

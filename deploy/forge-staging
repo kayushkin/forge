@@ -261,6 +261,47 @@ DEPLOYEOF
     echo "✅ slot-$slot deployed: http://$slot.dev.kayushkin.com"
 }
 
+cmd_deploy_only() {
+    # Deploy without slot membership checks — used by forge CLI which manages its own DB
+    local slot=$1
+    local agent=$2
+    shift 2
+    local repo_branches=("$@")
+    
+    local env_repos="$ENVS_DIR/env-$slot/repos"
+    
+    local checkout_cmds=""
+    for rb in "${repo_branches[@]}"; do
+        local repo="${rb%%:*}"
+        local branch="${rb##*:}"
+        if [ "$repo" != "$rb" ]; then
+            checkout_cmds+="echo \"  $repo → $branch\" && cd $env_repos/$repo && git fetch origin && git checkout $branch && git pull origin $branch --ff-only 2>/dev/null || true; "
+        fi
+    done
+    
+    if [ -z "$checkout_cmds" ]; then
+        checkout_cmds="for repo in bus si kayushkin.com; do cd $env_repos/\$repo && git fetch origin && git pull --ff-only 2>/dev/null || true; done"
+    fi
+    
+    echo "Deploying to slot-$slot..."
+    
+    $SSH bash <<DEPLOYEOF
+export PATH=\$HOME/.local/share/mise/shims:\$PATH
+echo "Checking out code..."
+$checkout_cmds
+
+echo "Rebuilding environment..."
+export REPOS_DIR=$REPOS_DIR
+export FORGE_DIR=$FORGE_DIR
+export ENVS_DIR=$ENVS_DIR
+cd $FORGE_DIR/deploy
+bash forge-env restart $slot
+DEPLOYEOF
+    
+    echo ""
+    echo "✅ slot-$slot deployed: http://$slot.dev.kayushkin.com"
+}
+
 cmd_log() {
     local slot=${1:-}
     if [ -n "$slot" ]; then
@@ -306,6 +347,10 @@ CMD=$1; shift
 
 case "$CMD" in
     status) cmd_status ;;
+    deploy-only)
+        # Called by forge CLI — skips membership check (forge DB handles that)
+        [ $# -lt 2 ] && { echo "Usage: forge-staging deploy-only <N> <agent> [repo:branch...]" >&2; exit 1; }
+        cmd_deploy_only "$@" ;;
     open)
         [ $# -lt 2 ] && { echo "Usage: forge-staging open <change-name> <agent>" >&2; exit 1; }
         cmd_open "$1" "$2" ;;

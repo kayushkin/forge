@@ -332,3 +332,10 @@ func (f *Forge) SyncEnvironmentRepos(envID int) error {
 	}
 	return nil
 }
+
+// AcquireOpts is the options for environment acquisition (v2, deprecated).
+type AcquireOpts struct {
+	AgentID      string
+	SessionID    string
+	Orchestrator string
+}

@@ -3,261 +3,305 @@ package forge
 import (
 	"database/sql"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"strings"
 	"time"
 )
 
-// Slot represents an isolated workspace
-type Slot struct {
-	ID           int
-	Project      string
-	Path         string
-	Branch       string
-	Status       string // ready, acquired, building, previewing, dirty
-	AgentID      string
-	SessionID    string
-	Orchestrator string
-	AcquiredAt   *time.Time
-	ReleasedAt   *time.Time
+const slotSchemaSQL = `
+CREATE TABLE IF NOT EXISTS slot_agents (
+    slot_id INTEGER NOT NULL,
+    agent_name TEXT NOT NULL,
+    joined_at INTEGER NOT NULL,
+    PRIMARY KEY (slot_id, agent_name),
+    FOREIGN KEY (slot_id) REFERENCES slots_v3(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS slot_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slot_id INTEGER NOT NULL,
+    agent_name TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_slot_log_slot ON slot_log(slot_id);
+`
+
+// SlotInfo is the full state of a slot including agents.
+type SlotInfo struct {
+	SlotV3
+	ChangeName string
+	Agents     []string
+	Deploys    int
 }
 
-// AcquireOpts configures a slot acquisition
-type AcquireOpts struct {
-	AgentID      string
-	SessionID    string
-	Orchestrator string
-}
+// OpenSlot claims an idle slot for a change, with the first agent.
+func (f *Forge) OpenSlot(projectID, changeName, agentName string) (*SlotInfo, error) {
+	now := time.Now().Unix()
 
-// ErrNoSlots is returned when all slots are busy
-var ErrNoSlots = fmt.Errorf("no available slots")
-
-// InitSlots creates worktree slots for a registered project
-func (f *Forge) InitSlots(projectID string) error {
-	p, err := f.GetProject(projectID)
+	tx, err := f.db.Begin()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	defer tx.Rollback()
 
-	baseRepo := expandPath(p.BaseRepo)
-	poolDir := expandPath(p.PoolDir)
-
-	// Verify git repo
-	if _, err := os.Stat(filepath.Join(baseRepo, ".git")); err != nil {
-		return fmt.Errorf("%s is not a git repo: %w", baseRepo, err)
-	}
-
-	if err := os.MkdirAll(poolDir, 0755); err != nil {
-		return fmt.Errorf("create pool dir: %w", err)
-	}
-
-	for i := 0; i < p.PoolSize; i++ {
-		slotPath := filepath.Join(poolDir, fmt.Sprintf("slot-%d", i))
-		branch := fmt.Sprintf("pool/%s/slot-%d", projectID, i)
-
-		_, err := f.db.Exec(`
-			INSERT OR IGNORE INTO slots (id, project, path, branch, status)
-			VALUES (?, ?, ?, ?, 'ready')
-		`, i, projectID, slotPath, branch)
-		if err != nil {
-			return fmt.Errorf("insert slot %d: %w", i, err)
-		}
-
-		// Create worktree if it doesn't exist
-		if _, err := os.Stat(slotPath); err == nil {
-			continue
-		}
-
-		cmd := exec.Command("git", "worktree", "add", slotPath, "-b", branch)
-		cmd.Dir = baseRepo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("create worktree %d: %w\n%s", i, err, out)
-		}
-	}
-
-	return nil
-}
-
-// Acquire leases the first available slot
-func (f *Forge) Acquire(projectID string, opts AcquireOpts) (*Slot, error) {
-	var id int
-	var path, branch string
-	err := f.db.QueryRow(`
-		SELECT id, path, branch FROM slots
-		WHERE project = ? AND status = 'ready'
-		ORDER BY id LIMIT 1
-	`, projectID).Scan(&id, &path, &branch)
+	// Find idle slot
+	var slotID, slotNum, basePort int
+	var containerName string
+	err = tx.QueryRow(`
+		SELECT id, slot_num, container_name, base_port
+		FROM slots_v3
+		WHERE project_id = ? AND status = 'idle'
+		ORDER BY slot_num
+		LIMIT 1
+	`, projectID).Scan(&slotID, &slotNum, &containerName, &basePort)
 	if err == sql.ErrNoRows {
-		return nil, ErrNoSlots
+		return nil, fmt.Errorf("no idle slots for project %s", projectID)
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	ts := now()
-	_, err = f.db.Exec(`
-		UPDATE slots SET status = 'acquired', agent_id = ?, session_id = ?, orchestrator = ?, acquired_at = ?, released_at = NULL
-		WHERE project = ? AND id = ?
-	`, opts.AgentID, opts.SessionID, opts.Orchestrator, ts, projectID, id)
+	// Claim it
+	_, err = tx.Exec(`
+		UPDATE slots_v3
+		SET status = 'active', agent_id = ?, session_id = ?, acquired_at = ?
+		WHERE id = ?
+	`, changeName, agentName, now, slotID)
 	if err != nil {
 		return nil, err
 	}
 
-	acq := time.Unix(ts, 0)
-	return &Slot{
-		ID:           id,
-		Project:      projectID,
-		Path:         path,
-		Branch:       branch,
-		Status:       "acquired",
-		AgentID:      opts.AgentID,
-		SessionID:    opts.SessionID,
-		Orchestrator: opts.Orchestrator,
-		AcquiredAt:   &acq,
+	// Add first agent
+	_, err = tx.Exec(`
+		INSERT INTO slot_agents (slot_id, agent_name, joined_at)
+		VALUES (?, ?, ?)
+	`, slotID, agentName, now)
+	if err != nil {
+		return nil, err
+	}
+
+	// Log it
+	_, err = tx.Exec(`
+		INSERT INTO slot_log (slot_id, agent_name, action, detail, created_at)
+		VALUES (?, ?, 'open', ?, ?)
+	`, slotID, agentName, "change="+changeName, now)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return &SlotInfo{
+		SlotV3: SlotV3{
+			ID:            slotID,
+			ProjectID:     projectID,
+			SlotNum:       slotNum,
+			ContainerName: containerName,
+			Status:        "active",
+			BasePort:      basePort,
+			AgentID:       changeName,
+			SessionID:     agentName,
+		},
+		ChangeName: changeName,
+		Agents:     []string{agentName},
 	}, nil
 }
 
-// Release returns a slot to the pool.
-// The worktree is NOT reset here — changes are preserved for preview/review.
-// Reset happens on the next Acquire (clean slate for new work).
-func (f *Forge) Release(projectID string, slotID int) error {
-	// Stop any running preview
-	f.StopPreview(projectID, slotID)
+// JoinSlot adds an agent to an active slot.
+func (f *Forge) JoinSlot(slotID int, agentName string) error {
+	now := time.Now().Unix()
 
-	_, err := f.db.Exec(`
-		UPDATE slots SET status = 'ready', agent_id = NULL, session_id = NULL, orchestrator = NULL, released_at = ?
-		WHERE project = ? AND id = ?
-	`, now(), projectID, slotID)
-	return err
-}
+	// Check slot is active
+	var status string
+	err := f.db.QueryRow(`SELECT status FROM slots_v3 WHERE id = ?`, slotID).Scan(&status)
+	if err != nil {
+		return fmt.Errorf("slot %d not found: %w", slotID, err)
+	}
+	if status != "active" {
+		return fmt.Errorf("slot %d is %s, not active", slotID, status)
+	}
 
-// CleanSlot resets a slot's worktree to origin/main. Called on acquire or explicitly.
-func (f *Forge) CleanSlot(projectID string, slotID int) error {
-	var path string
-	if err := f.db.QueryRow(`SELECT path FROM slots WHERE project = ? AND id = ?`, projectID, slotID).Scan(&path); err != nil {
+	_, err = f.db.Exec(`
+		INSERT OR IGNORE INTO slot_agents (slot_id, agent_name, joined_at)
+		VALUES (?, ?, ?)
+	`, slotID, agentName, now)
+	if err != nil {
 		return err
 	}
-	resetWorktree(path)
+
+	f.logSlotAction(slotID, agentName, "join", "")
 	return nil
 }
 
-// SlotStatus returns all slots for a project
-func (f *Forge) SlotStatus(projectID string) ([]Slot, error) {
+// LeaveSlot removes an agent from a slot.
+func (f *Forge) LeaveSlot(slotID int, agentName string) error {
+	_, err := f.db.Exec(`
+		DELETE FROM slot_agents WHERE slot_id = ? AND agent_name = ?
+	`, slotID, agentName)
+	if err != nil {
+		return err
+	}
+
+	f.logSlotAction(slotID, agentName, "leave", "")
+	return nil
+}
+
+// CloseSlot releases a slot. Fails if agents are still on it.
+func (f *Forge) CloseSlot(slotID int) error {
+	// Check for remaining agents
+	agents, err := f.SlotAgents(slotID)
+	if err != nil {
+		return err
+	}
+	if len(agents) > 0 {
+		return fmt.Errorf("slot %d still has agents: %s", slotID, strings.Join(agents, ", "))
+	}
+
+	_, err = f.db.Exec(`
+		UPDATE slots_v3
+		SET status = 'idle', agent_id = NULL, session_id = NULL, acquired_at = NULL
+		WHERE id = ?
+	`, slotID)
+	if err != nil {
+		return err
+	}
+
+	f.logSlotAction(slotID, "system", "close", "")
+	return nil
+}
+
+// ForceCloseSlot releases a slot regardless of agents.
+func (f *Forge) ForceCloseSlot(slotID int) error {
+	f.db.Exec(`DELETE FROM slot_agents WHERE slot_id = ?`, slotID)
+
+	_, err := f.db.Exec(`
+		UPDATE slots_v3
+		SET status = 'idle', agent_id = NULL, session_id = NULL, acquired_at = NULL
+		WHERE id = ?
+	`, slotID)
+	if err != nil {
+		return err
+	}
+
+	f.logSlotAction(slotID, "system", "force-close", "")
+	return nil
+}
+
+// IsSlotMember checks if an agent is on a slot.
+func (f *Forge) IsSlotMember(slotID int, agentName string) (bool, error) {
+	var count int
+	err := f.db.QueryRow(`
+		SELECT COUNT(*) FROM slot_agents WHERE slot_id = ? AND agent_name = ?
+	`, slotID, agentName).Scan(&count)
+	return count > 0, err
+}
+
+// SlotAgents returns agents on a slot.
+func (f *Forge) SlotAgents(slotID int) ([]string, error) {
 	rows, err := f.db.Query(`
-		SELECT id, project, path, branch, status, agent_id, session_id, orchestrator, acquired_at, released_at
-		FROM slots WHERE project = ? ORDER BY id
-	`, projectID)
+		SELECT agent_name FROM slot_agents WHERE slot_id = ? ORDER BY joined_at
+	`, slotID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var results []Slot
+	var agents []string
 	for rows.Next() {
-		var s Slot
-		var agentID, sessionID, orchestrator sql.NullString
-		var acquiredAt, releasedAt sql.NullInt64
-		if err := rows.Scan(&s.ID, &s.Project, &s.Path, &s.Branch, &s.Status, &agentID, &sessionID, &orchestrator, &acquiredAt, &releasedAt); err != nil {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		if agentID.Valid {
-			s.AgentID = agentID.String
-		}
-		if sessionID.Valid {
-			s.SessionID = sessionID.String
-		}
-		if orchestrator.Valid {
-			s.Orchestrator = orchestrator.String
-		}
-		if acquiredAt.Valid {
-			t := time.Unix(acquiredAt.Int64, 0)
-			s.AcquiredAt = &t
-		}
-		if releasedAt.Valid {
-			t := time.Unix(releasedAt.Int64, 0)
-			s.ReleasedAt = &t
-		}
-		results = append(results, s)
+		agents = append(agents, name)
 	}
-	return results, nil
+	return agents, nil
 }
 
-// AllSlots returns slots across all projects
-func (f *Forge) AllSlots() ([]Slot, error) {
-	rows, err := f.db.Query(`
-		SELECT id, project, path, branch, status, agent_id, session_id, orchestrator, acquired_at, released_at
-		FROM slots ORDER BY project, id
-	`)
+// LogSlotDeploy records a deploy action for a slot.
+func (f *Forge) LogSlotDeploy(slotID int, agentName, detail string) {
+	f.logSlotAction(slotID, agentName, "deploy", detail)
+}
+
+// SlotLog returns recent log entries for a slot (or all slots if slotID=0).
+func (f *Forge) SlotLog(slotID int, limit int) ([]SlotLogEntry, error) {
+	var rows *sql.Rows
+	var err error
+	if slotID > 0 {
+		rows, err = f.db.Query(`
+			SELECT sl.id, sl.slot_id, s.slot_num, sl.agent_name, sl.action, sl.detail, sl.created_at
+			FROM slot_log sl
+			JOIN slots_v3 s ON sl.slot_id = s.id
+			WHERE sl.slot_id = ?
+			ORDER BY sl.id DESC LIMIT ?
+		`, slotID, limit)
+	} else {
+		rows, err = f.db.Query(`
+			SELECT sl.id, sl.slot_id, s.slot_num, sl.agent_name, sl.action, sl.detail, sl.created_at
+			FROM slot_log sl
+			JOIN slots_v3 s ON sl.slot_id = s.id
+			ORDER BY sl.id DESC LIMIT ?
+		`, limit)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var results []Slot
+	var entries []SlotLogEntry
 	for rows.Next() {
-		var s Slot
-		var agentID, sessionID, orchestrator sql.NullString
-		var acquiredAt, releasedAt sql.NullInt64
-		if err := rows.Scan(&s.ID, &s.Project, &s.Path, &s.Branch, &s.Status, &agentID, &sessionID, &orchestrator, &acquiredAt, &releasedAt); err != nil {
+		var e SlotLogEntry
+		var detail sql.NullString
+		if err := rows.Scan(&e.ID, &e.SlotID, &e.SlotNum, &e.AgentName, &e.Action, &detail, &e.CreatedAt); err != nil {
 			return nil, err
 		}
-		if agentID.Valid {
-			s.AgentID = agentID.String
-		}
-		if sessionID.Valid {
-			s.SessionID = sessionID.String
-		}
-		if orchestrator.Valid {
-			s.Orchestrator = orchestrator.String
-		}
-		if acquiredAt.Valid {
-			t := time.Unix(acquiredAt.Int64, 0)
-			s.AcquiredAt = &t
-		}
-		if releasedAt.Valid {
-			t := time.Unix(releasedAt.Int64, 0)
-			s.ReleasedAt = &t
-		}
-		results = append(results, s)
+		e.Detail = detail.String
+		entries = append(entries, e)
 	}
-	return results, nil
+	return entries, nil
 }
 
-// Git helpers for slots
-
-// SlotPull fetches and merges the default branch into a slot's worktree
-func (f *Forge) SlotPull(projectID string, slotID int) error {
-	var path string
-	if err := f.db.QueryRow(`SELECT path FROM slots WHERE project = ? AND id = ?`, projectID, slotID).Scan(&path); err != nil {
-		return err
+// GetSlotByNum finds a slot by project + slot number.
+func (f *Forge) GetSlotByNum(projectID string, slotNum int) (*SlotV3, error) {
+	var slot SlotV3
+	var containerID, imageID, agentID, sessionID sql.NullString
+	err := f.db.QueryRow(`
+		SELECT id, project_id, slot_num, container_name, status, container_id, image_id, base_port, agent_id, session_id
+		FROM slots_v3
+		WHERE project_id = ? AND slot_num = ?
+	`, projectID, slotNum).Scan(&slot.ID, &slot.ProjectID, &slot.SlotNum, &slot.ContainerName,
+		&slot.Status, &containerID, &imageID, &slot.BasePort, &agentID, &sessionID)
+	if err != nil {
+		return nil, err
 	}
-	return gitPull(path)
+	slot.ContainerID = containerID.String
+	slot.ImageID = imageID.String
+	slot.AgentID = agentID.String
+	slot.SessionID = sessionID.String
+	return &slot, nil
 }
 
-// SlotCommit commits all changes in a slot
-func (f *Forge) SlotCommit(projectID string, slotID int, msg string) error {
-	var path string
-	if err := f.db.QueryRow(`SELECT path FROM slots WHERE project = ? AND id = ?`, projectID, slotID).Scan(&path); err != nil {
-		return err
-	}
-	return gitCommit(path, msg)
+func (f *Forge) logSlotAction(slotID int, agent, action, detail string) {
+	f.db.Exec(`
+		INSERT INTO slot_log (slot_id, agent_name, action, detail, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, slotID, agent, action, detail, time.Now().Unix())
 }
 
-// SlotPush pushes the slot's branch to origin
-func (f *Forge) SlotPush(projectID string, slotID int) error {
-	var path, branch string
-	if err := f.db.QueryRow(`SELECT path, branch FROM slots WHERE project = ? AND id = ?`, projectID, slotID).Scan(&path, &branch); err != nil {
-		return err
-	}
-	return gitPush(path, branch)
+type SlotLogEntry struct {
+	ID        int
+	SlotID    int
+	SlotNum   int
+	AgentName string
+	Action    string
+	Detail    string
+	CreatedAt int64
 }
 
-// SlotDiff returns the diff of the slot against the default branch
-func (f *Forge) SlotDiff(projectID string, slotID int) (string, error) {
-	var path string
-	if err := f.db.QueryRow(`SELECT path FROM slots WHERE project = ? AND id = ?`, projectID, slotID).Scan(&path); err != nil {
-		return "", err
-	}
-	return gitDiff(path)
+// InitSlotSchema creates the slot_agents and slot_log tables.
+func (f *Forge) InitSlotSchema() error {
+	_, err := f.db.Exec(slotSchemaSQL)
+	return err
 }
