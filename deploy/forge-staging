@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# forge-staging — manage staging environments remotely
+# forge-staging — staging environment management
+#
+# Slots are claimed with a change name. Multiple agents can work on the same slot.
+# All actions are logged.
 #
 # Usage:
-#   forge-staging claim <agent-name>       — claim next available env, prints env number
-#   forge-staging release <N>              — release env N
-#   forge-staging deploy <N> [repo:branch] — pull branch & rebuild env N
-#   forge-staging status                   — show all envs and who owns them
-#   forge-staging url <N>                  — print the env URL
-#
-# Designed to be called by agents (inber or openclaw) via SSH.
+#   forge-staging open <change-name> <agent>      — claim a slot for a change, returns slot number
+#   forge-staging join <N> <agent>                 — join an existing slot
+#   forge-staging leave <N> <agent>                — leave a slot
+#   forge-staging close <N>                        — release slot (must have no agents)
+#   forge-staging deploy <N> <agent> [repo:branch] — deploy to slot (must be a member)
+#   forge-staging status                           — show all slots
+#   forge-staging log [N]                          — show activity log
+#   forge-staging url <N>                          — print slot URL
 
 set -euo pipefail
 
@@ -19,100 +23,252 @@ REMOTE_USER="kayushkincom"
 REMOTE_HOST="kayushkin.com"
 SSH="sshpass -p $KAYUSHKINCOM_PASS ssh -o StrictHostKeyChecking=no $REMOTE_USER@$REMOTE_HOST"
 
-LOCK_DIR="/home/kayushkincom/forge/locks"
+SLOT_DIR="/home/kayushkincom/forge/slots"
+LOG_FILE="/home/kayushkincom/forge/staging.log"
 REPOS_DIR="/home/kayushkincom/repos"
 FORGE_DIR="/home/kayushkincom/repos/forge"
 ENVS_DIR="/home/kayushkincom/forge/envs"
 
-remote() { $SSH "$1"; }
+# --- Remote helpers ---
+
+# Run a script on the server. Uses heredoc with delimiter to avoid quoting issues.
+run_remote() {
+    $SSH bash -s <<< "$1"
+}
+
+# Append to the activity log
+log_action() {
+    local slot=$1 agent=$2 action=$3 detail=${4:-}
+    run_remote "mkdir -p $(dirname $LOG_FILE); echo \"\$(date -Iseconds) slot=$slot agent=$agent action=$action $detail\" >> $LOG_FILE"
+}
+
+# --- Slot state (JSON files on server) ---
+# Each slot has: $SLOT_DIR/N.json
+# {
+#   "change": "feature-name",
+#   "agents": ["brigid", "fionn"],
+#   "created_at": "2026-03-11T20:00:00",
+#   "deploys": 3
+# }
 
 cmd_status() {
-    $SSH bash <<STATUSEOF
-mkdir -p $LOCK_DIR
+    $SSH bash <<'STATUSEOF'
+SLOT_DIR="/home/kayushkincom/forge/slots"
+mkdir -p "$SLOT_DIR"
 for i in 0 1 2; do
-    lock="$LOCK_DIR/env-\${i}.lock"
-    if [ -f "\$lock" ]; then
-        owner=\$(cat "\$lock")
-        echo "env-\${i}: claimed by \$owner"
+    f="$SLOT_DIR/$i.json"
+    if [ -f "$f" ]; then
+        change=$(python3 -c "import json; d=json.load(open('$f')); print(d.get('change','?'))")
+        agents=$(python3 -c "import json; d=json.load(open('$f')); print(', '.join(d.get('agents',[])))")
+        deploys=$(python3 -c "import json; d=json.load(open('$f')); print(d.get('deploys',0))")
+        echo "slot-$i: \"$change\" | agents: [$agents] | deploys: $deploys | http://$i.dev.kayushkin.com"
     else
-        echo "env-\${i}: available"
+        echo "slot-$i: available"
     fi
 done
 STATUSEOF
 }
 
-cmd_claim() {
-    local agent=$1
-    local result
-    result=$($SSH bash <<CLAIMEOF
-mkdir -p $LOCK_DIR
+cmd_open() {
+    local change=$1
+    local agent=$2
+    
+    local slot
+    slot=$($SSH bash <<OPENEOF
+SLOT_DIR="/home/kayushkincom/forge/slots"
+mkdir -p "\$SLOT_DIR"
 for i in 0 1 2; do
-    lock="$LOCK_DIR/env-\${i}.lock"
-    if [ ! -f "\$lock" ]; then
-        echo "$agent" > "\$lock"
+    f="\$SLOT_DIR/\$i.json"
+    if [ ! -f "\$f" ]; then
+        python3 -c "
+import json, datetime
+json.dump({
+    'change': '$change',
+    'agents': ['$agent'],
+    'created_at': datetime.datetime.now().isoformat(),
+    'deploys': 0
+}, open('\$f', 'w'), indent=2)
+"
         echo "\$i"
         exit 0
     fi
 done
 echo "NONE"
 exit 1
-CLAIMEOF
+OPENEOF
     ) || true
     
-    if [ "$result" = "NONE" ] || [ -z "$result" ]; then
-        echo "ERROR: no available environments" >&2
+    if [ "$slot" = "NONE" ] || [ -z "$slot" ]; then
+        echo "ERROR: no available slots" >&2
         return 1
     fi
     
-    echo "$result"
+    log_action "$slot" "$agent" "open" "change=$change"
+    echo "$slot"
 }
 
-cmd_release() {
-    local env=$1
-    remote "rm -f $LOCK_DIR/env-$env.lock"
-    echo "env-$env released"
+cmd_join() {
+    local slot=$1
+    local agent=$2
+    
+    $SSH bash <<JOINEOF
+SLOT_DIR="/home/kayushkincom/forge/slots"
+f="\$SLOT_DIR/$slot.json"
+if [ ! -f "\$f" ]; then
+    echo "ERROR: slot-$slot is not open" >&2
+    exit 1
+fi
+python3 -c "
+import json
+d = json.load(open('\$f'))
+if '$agent' not in d['agents']:
+    d['agents'].append('$agent')
+    json.dump(d, open('\$f', 'w'), indent=2)
+    print('joined slot-$slot')
+else:
+    print('$agent already on slot-$slot')
+"
+JOINEOF
+    log_action "$slot" "$agent" "join"
 }
 
-cmd_url() {
-    local env=$1
-    echo "http://$env.dev.kayushkin.com"
+cmd_leave() {
+    local slot=$1
+    local agent=$2
+    
+    $SSH bash <<LEAVEEOF
+SLOT_DIR="/home/kayushkincom/forge/slots"
+f="\$SLOT_DIR/$slot.json"
+if [ ! -f "\$f" ]; then
+    echo "ERROR: slot-$slot is not open" >&2
+    exit 1
+fi
+python3 -c "
+import json
+d = json.load(open('\$f'))
+if '$agent' in d['agents']:
+    d['agents'].remove('$agent')
+    json.dump(d, open('\$f', 'w'), indent=2)
+    print('$agent left slot-$slot')
+else:
+    print('$agent was not on slot-$slot')
+"
+LEAVEEOF
+    log_action "$slot" "$agent" "leave"
+}
+
+cmd_close() {
+    local slot=$1
+    
+    $SSH bash <<CLOSEEOF
+SLOT_DIR="/home/kayushkincom/forge/slots"
+f="\$SLOT_DIR/$slot.json"
+if [ ! -f "\$f" ]; then
+    echo "slot-$slot already closed"
+    exit 0
+fi
+agents=\$(python3 -c "import json; d=json.load(open('\$f')); print(len(d.get('agents',[])))")
+if [ "\$agents" != "0" ]; then
+    agent_list=\$(python3 -c "import json; d=json.load(open('\$f')); print(', '.join(d['agents']))")
+    echo "ERROR: slot-$slot still has agents: \$agent_list" >&2
+    echo "They must leave first, or use 'forge-staging close $slot --force'" >&2
+    exit 1
+fi
+rm -f "\$f"
+echo "slot-$slot closed"
+CLOSEEOF
+    log_action "$slot" "system" "close"
 }
 
 cmd_deploy() {
-    local env=$1
-    shift
-    
-    # Parse optional repo:branch args
-    # e.g. "kayushkin.com:feature-x" or "bus:fix-thing si:main"
+    local slot=$1
+    local agent=$2
+    shift 2
     local repo_branches=("$@")
     
-    remote "
-        export PATH=\$HOME/.local/share/mise/shims:\$PATH
-        
-        # If specific repos/branches given, check them out
-        $(for rb in "${repo_branches[@]}"; do
-            repo="${rb%%:*}"
-            branch="${rb##*:}"
-            if [ "$repo" != "$rb" ]; then
-                echo "cd $REPOS_DIR/$repo && git fetch origin && git checkout $branch && git pull origin $branch --ff-only 2>/dev/null || true"
-            fi
-        done)
-        
-        # Pull latest on all repos (if no specific branches, just pull main)
-        $(if [ ${#repo_branches[@]} -eq 0 ]; then
-            echo "for repo in bus si kayushkin.com; do cd $REPOS_DIR/\$repo && git pull --ff-only 2>/dev/null || true; done"
-        fi)
-        
-        # Rebuild the environment
-        export REPOS_DIR=$REPOS_DIR
-        export FORGE_DIR=$FORGE_DIR
-        export ENVS_DIR=$ENVS_DIR
-        cd $FORGE_DIR/deploy
-        bash forge-env restart $env
-    "
+    # Verify agent is on the slot
+    local check
+    check=$($SSH bash <<CHECKEOF
+SLOT_DIR="/home/kayushkincom/forge/slots"
+f="\$SLOT_DIR/$slot.json"
+if [ ! -f "\$f" ]; then
+    echo "NOT_OPEN"
+    exit 1
+fi
+python3 -c "
+import json
+d = json.load(open('\$f'))
+if '$agent' in d['agents']:
+    print('OK')
+else:
+    print('NOT_MEMBER')
+"
+CHECKEOF
+    ) || true
     
+    if [ "$check" = "NOT_OPEN" ]; then
+        echo "ERROR: slot-$slot is not open" >&2
+        return 1
+    elif [ "$check" = "NOT_MEMBER" ]; then
+        echo "ERROR: $agent is not on slot-$slot. Run 'forge-staging join $slot $agent' first." >&2
+        return 1
+    fi
+    
+    # Build the checkout commands
+    local checkout_cmds=""
+    for rb in "${repo_branches[@]}"; do
+        local repo="${rb%%:*}"
+        local branch="${rb##*:}"
+        if [ "$repo" != "$rb" ]; then
+            checkout_cmds+="echo \"  $repo → $branch\" && cd $REPOS_DIR/$repo && git fetch origin && git checkout $branch && git pull origin $branch --ff-only 2>/dev/null || true; "
+        fi
+    done
+    
+    if [ -z "$checkout_cmds" ]; then
+        checkout_cmds="for repo in bus si kayushkin.com; do cd $REPOS_DIR/\$repo && git pull --ff-only 2>/dev/null || true; done"
+    fi
+    
+    echo "Deploying to slot-$slot..."
+    
+    $SSH bash <<DEPLOYEOF
+export PATH=\$HOME/.local/share/mise/shims:\$PATH
+echo "Checking out code..."
+$checkout_cmds
+
+echo "Rebuilding environment..."
+export REPOS_DIR=$REPOS_DIR
+export FORGE_DIR=$FORGE_DIR
+export ENVS_DIR=$ENVS_DIR
+cd $FORGE_DIR/deploy
+bash forge-env restart $slot
+
+# Increment deploy count
+SLOT_DIR="/home/kayushkincom/forge/slots"
+python3 -c "
+import json
+f = '$SLOT_DIR/$slot.json'
+d = json.load(open(f))
+d['deploys'] = d.get('deploys', 0) + 1
+json.dump(d, open(f, 'w'), indent=2)
+"
+DEPLOYEOF
+    
+    log_action "$slot" "$agent" "deploy" "repos=${repo_branches[*]:-main}"
     echo ""
-    echo "✅ env-$env deployed: http://$env.dev.kayushkin.com"
+    echo "✅ slot-$slot deployed: http://$slot.dev.kayushkin.com"
+}
+
+cmd_log() {
+    local slot=${1:-}
+    if [ -n "$slot" ]; then
+        run_remote "grep 'slot=$slot ' $LOG_FILE 2>/dev/null | tail -20 || echo 'no logs'"
+    else
+        run_remote "tail -30 $LOG_FILE 2>/dev/null || echo 'no logs'"
+    fi
+}
+
+cmd_url() {
+    echo "http://$1.dev.kayushkin.com"
 }
 
 # --- Main ---
@@ -122,17 +278,23 @@ if [ $# -lt 1 ]; then
 Usage: forge-staging <command> [args]
 
 Commands:
-  status                       Show all envs and who owns them
-  claim <agent-name>           Claim next available env (prints env number)
-  release <N>                  Release env N
-  deploy <N> [repo:branch...]  Deploy to env N (optionally checkout specific branches)
-  url <N>                      Print env URL
+  status                              Show all slots
+  open <change-name> <agent>          Claim a slot for a change
+  join <N> <agent>                    Join an existing slot
+  leave <N> <agent>                   Leave a slot
+  close <N>                           Release a slot (agents must leave first)
+  deploy <N> <agent> [repo:branch...] Deploy to a slot (must be a member)
+  log [N]                             Show activity log
+  url <N>                             Print slot URL
 
 Examples:
-  forge-staging claim kayushkin-agent
-  forge-staging deploy 0 kayushkin.com:feature-new-page
-  forge-staging deploy 1 bus:fix-api si:update-adapter
-  forge-staging release 0
+  SLOT=\$(forge-staging open new-reader brigid)
+  forge-staging join \$SLOT fionn
+  forge-staging deploy \$SLOT brigid kayushkin.com:feature-branch
+  forge-staging deploy \$SLOT fionn si:related-fix
+  forge-staging leave \$SLOT fionn
+  forge-staging leave \$SLOT brigid
+  forge-staging close \$SLOT
 USAGE
     exit 1
 fi
@@ -141,15 +303,22 @@ CMD=$1; shift
 
 case "$CMD" in
     status) cmd_status ;;
-    claim)
-        [ $# -lt 1 ] && { echo "Usage: forge-staging claim <agent-name>" >&2; exit 1; }
-        cmd_claim "$1" ;;
-    release)
-        [ $# -lt 1 ] && { echo "Usage: forge-staging release <N>" >&2; exit 1; }
-        cmd_release "$1" ;;
+    open)
+        [ $# -lt 2 ] && { echo "Usage: forge-staging open <change-name> <agent>" >&2; exit 1; }
+        cmd_open "$1" "$2" ;;
+    join)
+        [ $# -lt 2 ] && { echo "Usage: forge-staging join <N> <agent>" >&2; exit 1; }
+        cmd_join "$1" "$2" ;;
+    leave)
+        [ $# -lt 2 ] && { echo "Usage: forge-staging leave <N> <agent>" >&2; exit 1; }
+        cmd_leave "$1" "$2" ;;
+    close)
+        [ $# -lt 1 ] && { echo "Usage: forge-staging close <N>" >&2; exit 1; }
+        cmd_close "$1" ;;
     deploy)
-        [ $# -lt 1 ] && { echo "Usage: forge-staging deploy <N> [repo:branch...]" >&2; exit 1; }
+        [ $# -lt 2 ] && { echo "Usage: forge-staging deploy <N> <agent> [repo:branch...]" >&2; exit 1; }
         cmd_deploy "$@" ;;
+    log) cmd_log "${1:-}" ;;
     url)
         [ $# -lt 1 ] && { echo "Usage: forge-staging url <N>" >&2; exit 1; }
         cmd_url "$1" ;;
