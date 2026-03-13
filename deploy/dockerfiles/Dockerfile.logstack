@@ -3,7 +3,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN cd cmd/logstack && CGO_ENABLED=0 go build -o /logstack .
+RUN cd cmd/logstack && CGO_ENABLED=0 go build -buildvcs=false -o /logstack .
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*

@@ -5,7 +5,7 @@ FROM golang:1.24-bookworm AS builder
 ARG SERVICE_DIR=.
 WORKDIR /src
 COPY . .
-RUN cd ${SERVICE_DIR} && CGO_ENABLED=1 go build -o /app .
+RUN cd ${SERVICE_DIR} && CGO_ENABLED=1 go build -buildvcs=false -o /app .
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates sqlite3 curl && rm -rf /var/lib/apt/lists/*
