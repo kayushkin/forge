@@ -5,12 +5,40 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/kayushkin/forge"
 )
+
+// forgeScript resolves the path to a deploy script.
+// Checks: 1) next to the forge binary, 2) ~/repos/forge/deploy/, 3) ~/life/repos/forge/deploy/
+func forgeScript(name string) string {
+	// Next to the binary itself
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		// Check sibling deploy/ dir (if binary is in repo's cmd output)
+		candidate := filepath.Join(dir, "..", "repos", "forge", "deploy", name)
+		if abs, err := filepath.Abs(candidate); err == nil {
+			if _, err := os.Stat(abs); err == nil {
+				return abs
+			}
+		}
+	}
+	// ~/repos/forge/deploy/ (server)
+	if p := os.ExpandEnv("$HOME/repos/forge/deploy/" + name); fileExists(p) {
+		return p
+	}
+	// ~/life/repos/forge/deploy/ (WSL)
+	return os.ExpandEnv("$HOME/life/repos/forge/deploy/" + name)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 const defaultProject = "kayushkin-stack"
 
@@ -261,7 +289,7 @@ func slotDeploy(f *forge.Forge, args []string) {
 
 	// Call the shell deploy script which handles SSH
 	cmdArgs := []string{
-		os.ExpandEnv("$HOME/life/repos/forge/deploy/forge-staging"),
+		forgeScript("forge-staging"),
 		"deploy-only", fmt.Sprint(slotNum), agentName,
 	}
 	cmdArgs = append(cmdArgs, repoBranches...)
@@ -366,7 +394,7 @@ func autoDeploy(f *forge.Forge) {
 
 	// Call the shell deploy script
 	cmdArgs := []string{
-		os.ExpandEnv("$HOME/life/repos/forge/deploy/forge-staging"),
+		forgeScript("forge-staging"),
 		"deploy-only", fmt.Sprint(slotNum), agentName,
 	}
 	cmdArgs = append(cmdArgs, repoBranches...)
@@ -415,7 +443,7 @@ func prodDeploy(args []string) {
 		log.Fatal("usage: forge deploy <service|all>")
 	}
 	cmd := exec.Command("bash",
-		os.ExpandEnv("$HOME/life/repos/forge/deploy/forge-deploy-prod"),
+		forgeScript("forge-deploy-prod"),
 		args[0])
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
