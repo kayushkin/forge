@@ -45,7 +45,7 @@ REMOTE_PATH_PREFIX="export PATH=\$HOME/.local/share/mise/shims:\$PATH"
 # service_type: system (sudo systemctl) or user (systemctl --user)
 declare -A SERVICES
 SERVICES=(
-    [kayushkin]="kayushkin.com|go build -o kayushkin-server .|kayushkin-server|/home/kayushkincom/bin/kayushkin-server|kayushkin|system|http://localhost:8080/api/health"
+    [kayushkin]="kayushkin.com|go build -o kayushkin-server main.go|kayushkin-server|/home/kayushkincom/bin/kayushkin-server|kayushkin|user|http://localhost:8080/api/health"
     [bus]="bus|cd cmd/bus && go build -o ../../bus .|bus|/home/kayushkincom/bin/bus|bus|user|http://localhost:8100/stats?token=inber-bus-secret-2026"
     [si]="si|cd cmd/si && go build -o ../../si .|si|/home/kayushkincom/bin/si|si|user|"
     [logstack]="logstack|go build -o logstack ./cmd/logstack|logstack|/home/kayushkincom/bin/logstack|logstack|user|http://localhost:8088/api/v1/stats"
@@ -112,6 +112,12 @@ deploy_service() {
         fi
         cp '$repo_path/$binary_name' '$binary_dst'
     " || { err "$name: binary swap failed"; return 1; }
+    
+    # 4b. Copy frontend build for kayushkin
+    if [ "$name" = "kayushkin" ]; then
+        log "  Copying frontend build..."
+        remote "rm -rf ~/build/assets/* && cp -r '$repo_path/build/'* ~/build/" || { err "$name: frontend copy failed"; }
+    fi
     
     # 5. Start service
     log "  Starting service..."
