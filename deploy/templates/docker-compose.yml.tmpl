@@ -90,6 +90,10 @@ services:
       - KAYUSHKIN_PASSPHRASE=${KAYUSHKIN_PASSPHRASE:-forge-dev-{{.Env}}}
       - SI_WS_URL=ws://si:8120/ws
       - LOGSTACK_URL=http://logstack:8088
+      - FORGE_API_URL=http://host.docker.internal:8150
+      - BUS_AGENT_API_URL=http://host.docker.internal:8101
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       bus:
         condition: service_healthy
