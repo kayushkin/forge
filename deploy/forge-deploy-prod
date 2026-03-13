@@ -31,7 +31,12 @@ if [ -f "$ENV_FILE" ]; then
     source "$ENV_FILE"
 fi
 
-SSH_CMD="sshpass -p $KAYUSHKINCOM_PASS ssh -o StrictHostKeyChecking=no $REMOTE_USER@$REMOTE_HOST"
+# If already on the server, run locally
+if [ "$(whoami)" = "$REMOTE_USER" ]; then
+    SSH_CMD=""
+else
+    SSH_CMD="sshpass -p $KAYUSHKINCOM_PASS ssh -o StrictHostKeyChecking=no $REMOTE_USER@$REMOTE_HOST"
+fi
 
 # Remote PATH needs mise shims for go
 REMOTE_PATH_PREFIX="export PATH=\$HOME/.local/share/mise/shims:\$PATH"
@@ -56,7 +61,11 @@ err() { echo "[$(date '+%H:%M:%S')] ❌ $*" >&2; }
 ok()  { echo "[$(date '+%H:%M:%S')] ✅ $*"; }
 
 remote() {
-    $SSH_CMD "export PATH=\$HOME/.local/share/mise/shims:\$PATH; $1"
+    if [ -z "$SSH_CMD" ]; then
+        bash -c "export PATH=\$HOME/.local/share/mise/shims:\$PATH; $1"
+    else
+        $SSH_CMD "export PATH=\$HOME/.local/share/mise/shims:\$PATH; $1"
+    fi
 }
 
 deploy_service() {

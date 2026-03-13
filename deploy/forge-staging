@@ -21,7 +21,13 @@ if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; fi
 
 REMOTE_USER="kayushkincom"
 REMOTE_HOST="kayushkin.com"
-SSH="sshpass -p $KAYUSHKINCOM_PASS ssh -o StrictHostKeyChecking=no $REMOTE_USER@$REMOTE_HOST"
+
+# If already on the server, run locally instead of SSH
+if [ "$(whoami)" = "$REMOTE_USER" ]; then
+    SSH=""
+else
+    SSH="sshpass -p $KAYUSHKINCOM_PASS ssh -o StrictHostKeyChecking=no $REMOTE_USER@$REMOTE_HOST"
+fi
 
 SLOT_DIR="/home/kayushkincom/forge/slots"
 LOG_FILE="/home/kayushkincom/forge/staging.log"
