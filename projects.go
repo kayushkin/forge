@@ -52,16 +52,18 @@ func (f *Forge) RegisterProject(p Project) error {
 func (f *Forge) GetProject(id string) (*Project, error) {
 	p := &Project{ID: id}
 	var createdAt, updatedAt int64
+	var repoURL sql.NullString
 	err := f.db.QueryRow(`
 		SELECT base_repo, pool_dir, pool_size, default_branch, repo_url, build_cmd, serve_cmd, created_at, updated_at
 		FROM projects WHERE id = ?
-	`, id).Scan(&p.BaseRepo, &p.PoolDir, &p.PoolSize, &p.DefaultBranch, &p.RepoURL, &p.BuildCmd, &p.ServeCmd, &createdAt, &updatedAt)
+	`, id).Scan(&p.BaseRepo, &p.PoolDir, &p.PoolSize, &p.DefaultBranch, &repoURL, &p.BuildCmd, &p.ServeCmd, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("project %q not found", id)
 	}
 	if err != nil {
 		return nil, err
 	}
+	p.RepoURL = repoURL.String
 	p.CreatedAt = time.Unix(createdAt, 0)
 	p.UpdatedAt = time.Unix(updatedAt, 0)
 	return p, nil
@@ -82,9 +84,11 @@ func (f *Forge) ListProjects() ([]Project, error) {
 	for rows.Next() {
 		var p Project
 		var createdAt, updatedAt int64
-		if err := rows.Scan(&p.ID, &p.BaseRepo, &p.PoolDir, &p.PoolSize, &p.DefaultBranch, &p.RepoURL, &p.BuildCmd, &p.ServeCmd, &createdAt, &updatedAt); err != nil {
+		var repoURL sql.NullString
+		if err := rows.Scan(&p.ID, &p.BaseRepo, &p.PoolDir, &p.PoolSize, &p.DefaultBranch, &repoURL, &p.BuildCmd, &p.ServeCmd, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
+		p.RepoURL = repoURL.String
 		p.CreatedAt = time.Unix(createdAt, 0)
 		p.UpdatedAt = time.Unix(updatedAt, 0)
 		results = append(results, p)

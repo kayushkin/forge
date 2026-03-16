@@ -2,6 +2,7 @@ package forge
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
@@ -315,9 +316,12 @@ func (cm *ContainerManager) getProjectRepos(projectID string) ([]projectRepo, er
 	var repos []projectRepo
 	for rows.Next() {
 		var r projectRepo
-		if err := rows.Scan(&r.ProjectID, &r.RepoID, &r.RepoURL, &r.RepoPath, &r.LocalPath, &r.Branch); err != nil {
+		var repoURL, localPath sql.NullString
+		if err := rows.Scan(&r.ProjectID, &r.RepoID, &repoURL, &r.RepoPath, &localPath, &r.Branch); err != nil {
 			return nil, err
 		}
+		r.RepoURL = repoURL.String
+		r.LocalPath = localPath.String
 		repos = append(repos, r)
 	}
 	return repos, nil
