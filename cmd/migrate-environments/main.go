@@ -16,13 +16,13 @@ var defaultProjects = []struct {
 	isPrimary bool
 	portOff   int
 }{
-	{"inber", "~/life/repos/inber", true, -1},
-	{"bus", "~/life/repos/bus", false, 10},
-	{"si", "~/life/repos/si", false, 20},
-	{"kayushkin", "~/life/repos/kayushkin.com", false, 0},
-	{"agent-store", "~/life/repos/agent-store", false, -1},
-	{"forge", "~/life/repos/forge", false, -1},
-	{"model-store", "~/life/repos/model-store", false, -1},
+	{"inber", "~/repos/inber", true, -1},
+	{"bus", "~/repos/bus", false, 10},
+	{"si", "~/repos/si", false, 20},
+	{"kayushkin", "~/repos/kayushkin.com", false, 0},
+	{"agent-store", "~/repos/agent-store", false, -1},
+	{"forge", "~/repos/forge", false, -1},
+	{"model-store", "~/repos/model-store", false, -1},
 }
 
 func expandPath(path string) string {

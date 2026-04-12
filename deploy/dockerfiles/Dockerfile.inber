@@ -31,9 +31,9 @@ COPY inber/agents/ /etc/inber/agents/
 COPY inber/deploy/agents-seed.db /etc/inber/agents.db
 
 # Symlink agents where bus-agent sync expects them
-RUN mkdir -p /root/life/repos/inber && \
-    ln -sf /etc/inber/agents.json /root/life/repos/inber/agents.json && \
-    ln -sf /etc/inber/agents /root/life/repos/inber/agents
+RUN mkdir -p /root/repos/inber && \
+    ln -sf /etc/inber/agents.json /root/repos/inber/agents.json && \
+    ln -sf /etc/inber/agents /root/repos/inber/agents
 
 COPY forge/deploy/dockerfiles/inber-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

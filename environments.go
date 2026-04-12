@@ -37,7 +37,7 @@ type EnvironmentRepo struct {
 var ErrNoEnvironments = fmt.Errorf("no available environments")
 
 // DefaultEnvDir is where environments live
-var DefaultEnvDir = expandPath("~/life/repos/.envs")
+var DefaultEnvDir = expandPath("~/repos/.envs")
 
 // DefaultProjects lists projects that go in each environment
 var DefaultProjects = []string{"inber", "bus", "si", "kayushkin", "agent-store", "forge", "model-store", "aiauth"}

@@ -14,7 +14,7 @@ set -euo pipefail
 # Source server env for API keys etc.
 [ -f "$HOME/bin/.env" ] && source "$HOME/bin/.env"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 FORGE_DIR="$(dirname "$SCRIPT_DIR")"
 REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
 ENVS_DIR="${ENVS_DIR:-$HOME/forge/envs}"

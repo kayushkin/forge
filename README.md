@@ -28,8 +28,8 @@ f, _ := forge.Open("")
 // Register a project
 f.RegisterProject(forge.Project{
     ID:       "kayushkin",
-    BaseRepo: "~/life/repos/kayushkin.com",
-    PoolDir:  "~/life/repos/.pools/kayushkin",
+    BaseRepo: "~/repos/kayushkin.com",
+    PoolDir:  "~/repos/.pools/kayushkin",
     PoolSize: 3,
     BuildCmd: "go build -o server .",
     ServeCmd: "./server -port {port} -build ./build",
@@ -56,7 +56,7 @@ slot, _ := f.Acquire("kayushkin", forge.AcquireOpts{
     SessionID:    "sess-abc",
     Orchestrator: "inber",
 })
-// slot.Path = ~/life/repos/.pools/kayushkin/slot-1
+// slot.Path = ~/repos/.pools/kayushkin/slot-1
 
 // Deploy preview
 preview, _ := f.StartPreview(forge.PreviewRequest{

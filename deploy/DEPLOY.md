@@ -16,7 +16,7 @@ When your code is ready for prod:
 
 ### Script: `forge-deploy-prod`
 
-Location: `~/life/repos/forge/deploy/forge-deploy-prod`
+Location: `~/repos/forge/deploy/forge-deploy-prod`
 
 ```bash
 # Deploy a single service
@@ -60,7 +60,7 @@ Three Docker Compose environments for testing changes across multiple projects.
 
 ### Managing Environments
 
-Script: `~/life/repos/forge/deploy/forge-env` (run on server or via SSH)
+Script: `~/repos/forge/deploy/forge-env` (run on server or via SSH)
 
 ```bash
 # Set env vars first

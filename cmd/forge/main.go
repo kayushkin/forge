@@ -14,7 +14,7 @@ import (
 )
 
 // forgeScript resolves the path to a deploy script.
-// Checks: 1) next to the forge binary, 2) ~/repos/forge/deploy/, 3) ~/life/repos/forge/deploy/
+// Checks: 1) next to the forge binary, 2) ~/repos/forge/deploy/
 func forgeScript(name string) string {
 	// Next to the binary itself
 	if exe, err := os.Executable(); err == nil {
@@ -31,8 +31,8 @@ func forgeScript(name string) string {
 	if p := os.ExpandEnv("$HOME/repos/forge/deploy/" + name); fileExists(p) {
 		return p
 	}
-	// ~/life/repos/forge/deploy/ (WSL)
-	return os.ExpandEnv("$HOME/life/repos/forge/deploy/" + name)
+	// ~/repos/forge/deploy/ (WSL)
+	return os.ExpandEnv("$HOME/repos/forge/deploy/" + name)
 }
 
 func fileExists(path string) bool {
