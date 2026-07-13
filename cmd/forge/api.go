@@ -299,14 +299,31 @@ type deployEntry struct {
 // --- Routes ---
 
 // routeInfo describes a single env var routing a service connection.
+//
+// Value is reported exactly as the unit declares it, and is EMPTY when the unit
+// does not declare it. forge deliberately does not substitute the service's
+// compiled-in default: it cannot know that default (it is the service's own
+// business, not forge's), and inventing one here would make an unconfigured var
+// indistinguishable from one deliberately pinned to that same value. This is a
+// rerouting UI — an operator reads it to learn where prod currently points, so
+// a guess served as configuration is worse than an admitted blank.
+//
+// Declared and SourceError are what let a caller tell the three states apart:
+//
+//	Declared=true                  → the unit sets this var; Value is its value.
+//	Declared=false, SourceError="" → the unit exists and does not set this var.
+//	Declared=false, SourceError!="" → the unit could not be read; nothing is known.
 type routeInfo struct {
-	Env     string   `json:"env"`     // "prod" or "env-0"
-	Service string   `json:"service"` // service name
-	EnvVar  string   `json:"env_var"` // env var name
-	Value   string   `json:"value"`   // current value
-	Proto   string   `json:"proto"`   // http, ws, cli
-	Target  string   `json:"target"`  // what it points to
-	Options []string `json:"options"` // available reroute targets
+	Env         string   `json:"env"`                    // "prod" or "env-0"
+	Service     string   `json:"service"`                // service name
+	EnvVar      string   `json:"env_var"`                // env var name
+	Value       string   `json:"value"`                  // value as declared; empty when undeclared
+	Declared    bool     `json:"declared"`               // whether the source actually declares this var
+	Source      string   `json:"source"`                 // the unit file this value was read from
+	SourceError string   `json:"source_error,omitempty"` // why Source could not be read, if it could not
+	Proto       string   `json:"proto"`                  // http, ws, cli
+	Target      string   `json:"target"`                 // what it points to
+	Options     []string `json:"options"`                // available reroute targets
 }
 
 type routeUpdateRequest struct {
@@ -377,47 +394,49 @@ func routeOptionsForVar(envVar string, envNum int) []routeOption {
 	return nil
 }
 
+// prodRoutableService is one prod service whose systemd unit forge reports from
+// and can rewrite, together with the env vars in it that route a connection to
+// another service.
+type prodRoutableService struct {
+	service string
+	unit    string
+	vars    []string
+}
+
+// prodRouteTable is the single source of truth for which prod services forge
+// will report on and rewrite, and which of their env vars are routable. Both the
+// read path (getRoutes) and the write path (updateRoute) consult it, so the set
+// of things the UI offers and the set of things it will act on cannot drift
+// apart. It is a slice, not a map, so the response does not reshuffle per call.
+func prodRouteTable() []prodRoutableService {
+	home, _ := os.UserHomeDir()
+	unit := func(name string) string {
+		return filepath.Join(home, ".config/systemd/user", name+".service")
+	}
+	return []prodRoutableService{
+		{"kayushkin", unit("kayushkin"), []string{"SI_WS_URL", "LOGSTACK_URL", "BUS_URL", "BUS_AGENT_API_URL", "FORGE_API_URL"}},
+		{"si", unit("si"), []string{"SI_BUS_URL", "LOGSTACK_URL"}},
+	}
+}
+
 func getRoutes() []routeInfo {
 	home, _ := os.UserHomeDir()
 	var routes []routeInfo
 
-	// Prod routes from systemd service files
-	serviceFiles := map[string]string{
-		"kayushkin": filepath.Join(home, ".config/systemd/user/kayushkin.service"),
-		"si":        filepath.Join(home, ".config/systemd/user/si.service"),
-		"bus":       filepath.Join(home, ".config/systemd/user/bus.service"),
-		"logstack":  filepath.Join(home, ".config/systemd/user/logstack.service"),
-	}
-
-	// Which env vars per service are routable
-	routableVars := map[string][]string{
-		"kayushkin": {"SI_WS_URL", "LOGSTACK_URL", "BUS_URL", "BUS_AGENT_API_URL", "FORGE_API_URL"},
-		"si":        {"SI_BUS_URL", "LOGSTACK_URL"},
-	}
-
-	for svc, path := range serviceFiles {
-		vars, ok := routableVars[svc]
-		if !ok {
-			continue
+	// Prod routes, read from each service's systemd unit. An undeclared var is
+	// reported empty — never filled in from a guess. See routeInfo.
+	for _, svc := range prodRouteTable() {
+		envMap, err := parseSystemdEnv(svc.unit)
+		sourceErr := ""
+		if err != nil {
+			// Loudly, and in the response: a unit forge cannot read means it knows
+			// nothing about that service's routing, which is not the same as the
+			// service routing nowhere.
+			sourceErr = err.Error()
+			log.Printf("forge: routes: cannot read unit for %s (%s): %v — reporting its routable vars as unknown", svc.service, svc.unit, err)
 		}
-		envMap := parseSystemdEnv(path)
-		for _, v := range vars {
-			val := envMap[v]
-			// Fall back to code defaults if not in service file
-			if val == "" {
-				switch v {
-				case "SI_WS_URL":
-					val = "ws://127.0.0.1:8090/ws"
-				case "LOGSTACK_URL":
-					val = "http://127.0.0.1:8088"
-				case "BUS_URL", "SI_BUS_URL":
-					val = "http://127.0.0.1:8100"
-				case "BUS_AGENT_API_URL":
-					val = "http://127.0.0.1:8101"
-				case "FORGE_API_URL":
-					val = "http://127.0.0.1:8150"
-				}
-			}
+		for _, v := range svc.vars {
+			value, declared := envMap[v]
 
 			opts := routeOptionsForVar(v, -1)
 			optStrs := make([]string, len(opts))
@@ -426,11 +445,14 @@ func getRoutes() []routeInfo {
 			}
 
 			routes = append(routes, routeInfo{
-				Env:     "prod",
-				Service: svc,
-				EnvVar:  v,
-				Value:   val,
-				Options: optStrs,
+				Env:         "prod",
+				Service:     svc.service,
+				EnvVar:      v,
+				Value:       value,
+				Declared:    declared,
+				Source:      svc.unit,
+				SourceError: sourceErr,
+				Options:     optStrs,
 			})
 		}
 	}
@@ -472,11 +494,16 @@ func isRoutingVar(name string) bool {
 }
 
 // parseSystemdEnv reads Environment= lines from a systemd service file.
-func parseSystemdEnv(path string) map[string]string {
+//
+// A read failure is returned, never swallowed. A unit that cannot be read and a
+// unit that declares nothing both used to come back as an empty map, which is
+// what let getRoutes serve a hardcoded guess for a service whose unit was not
+// even there. The caller must be able to tell those two apart.
+func parseSystemdEnv(path string) (map[string]string, error) {
 	result := make(map[string]string)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return result
+		return nil, err
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -488,19 +515,54 @@ func parseSystemdEnv(path string) map[string]string {
 			}
 		}
 	}
-	return result
+	return result, nil
+}
+
+// resolveRouteUpdate validates a reroute request against prodRouteTable and
+// returns the unit file it may rewrite.
+//
+// Everything here is untrusted request input that ends up as a systemd directive
+// in a unit file that is then restarted, so each field is checked against the
+// same table the read path serves, rather than being pasted through:
+//
+//   - service must be one named in the table. It used to be joined straight onto
+//     a path, so any existing *.service file reachable by traversal could be
+//     rewritten and restarted.
+//   - env_var must be routable for that service. Otherwise this endpoint sets
+//     arbitrary environment on a unit, which is not what a rerouting UI does.
+//   - value must be a single line. A newline lets the caller close the
+//     Environment= directive and append further systemd directives — an ExecStart=
+//     of their choosing, which forge then restarts the unit to run.
+func resolveRouteUpdate(req routeUpdateRequest) (unit string, err error) {
+	if req.Env != "prod" {
+		return "", fmt.Errorf("rerouting staging services not yet supported (use docker compose)")
+	}
+	if req.Service == "" || req.EnvVar == "" || req.Value == "" {
+		return "", fmt.Errorf("service, env_var, and value are required")
+	}
+	if strings.ContainsAny(req.Value, "\n\r") {
+		return "", fmt.Errorf("value must be a single line: %q contains a line break", req.Value)
+	}
+	for _, svc := range prodRouteTable() {
+		if svc.service != req.Service {
+			continue
+		}
+		for _, v := range svc.vars {
+			if v == req.EnvVar {
+				return svc.unit, nil
+			}
+		}
+		return "", fmt.Errorf("%s is not a routable env var for %s (routable: %s)",
+			req.EnvVar, req.Service, strings.Join(svc.vars, ", "))
+	}
+	return "", fmt.Errorf("%s is not a reroutable service", req.Service)
 }
 
 func updateRoute(req routeUpdateRequest) (*routeUpdateResult, error) {
-	if req.Env != "prod" {
-		return nil, fmt.Errorf("rerouting staging services not yet supported (use docker compose)")
+	serviceFile, err := resolveRouteUpdate(req)
+	if err != nil {
+		return nil, err
 	}
-	if req.Service == "" || req.EnvVar == "" || req.Value == "" {
-		return nil, fmt.Errorf("service, env_var, and value are required")
-	}
-
-	home, _ := os.UserHomeDir()
-	serviceFile := filepath.Join(home, ".config/systemd/user", req.Service+".service")
 
 	data, err := os.ReadFile(serviceFile)
 	if err != nil {

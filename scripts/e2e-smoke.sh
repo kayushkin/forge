@@ -24,7 +24,7 @@
 #
 # WHAT THIS DELIBERATELY DOES NOT TOUCH:
 #   * POST /api/forge/routes — it REWRITES ~/.config/systemd/user/*.service and
-#     runs `systemctl --user restart` (api.go:494-556). A smoke must never call
+#     runs `systemctl --user restart` (updateRoute, api.go). A smoke must never call
 #     it. GET on the same path is read-only and safe, and with a temp HOME it
 #     reads an empty directory.
 #   * GET /api/forge/topology — shells out to `ss` and `docker compose ps`
@@ -167,34 +167,49 @@ TS=$(jq -r '.timestamp' <<<"$ENTRY")
 [ "$TS" -gt 0 ] 2>/dev/null || fail "log entry has a zero/absent unix timestamp: $ENTRY"
 echo "    deploy log: slot=$SLOT agent=$AGENT action=open detail=change=$CHANGE ts=$TS"
 
-step "GET /api/forge/routes — PINS A KNOWN BUG: the values are fabricated, not read"
+step "GET /api/forge/routes — reports what the units declare, and nothing else"
 # The read side of the route this smoke must never POST to.
 #
-# This assertion pins current behaviour, and that behaviour is WRONG. It is
-# asserted-as-is on purpose so that fixing the bug trips this step deliberately
-# rather than silently.
+# This step used to pin the opposite behaviour on purpose. getRoutes() filled
+# every var it did not find in a unit from a hardcoded fallback table, so an
+# undeclared var was indistinguishable from one pinned to the fallback and the
+# API served the guess as if it were the configuration. On the live box the real
+# units declared exactly ONE of the seven routable vars (si.service's
+# LOGSTACK_URL) — the other six values this endpoint returned were invented, in a
+# UI whose whole job is telling an operator where prod currently points.
 #
-# getRoutes() (api.go:380) reads each service's systemd unit for its routable
-# Environment= vars. parseSystemdEnv() (api.go:475-480) returns an EMPTY MAP on
-# a missing file — the read error is swallowed — and then getRoutes() fills every
-# var it did not find from a hardcoded fallback table (api.go:406-419).
+# Fixed: parseSystemdEnv returns its read error, and an undeclared var is now
+# reported with an empty value, declared=false, and a source_error saying why the
+# unit could not be read. forge cannot know a service's compiled-in default —
+# that is the service's business — so empty is the only honest answer.
 #
-# So a var that no unit declares is INDISTINGUISHABLE from one pinned to the
-# fallback value, and the API reports the guess as if it were the configuration.
-# On the live box the real units declare exactly ONE of the six routable vars
-# (si.service's LOGSTACK_URL) — every other value this endpoint serves is
-# invented. It is a rerouting UI: it tells an operator where prod currently
-# points, and five sixths of that answer is a hardcoded literal.
-#
-# Here, with HOME sandboxed, NO unit file exists at all — so a correct
-# implementation would return empty values, and this returns the full fallback
-# table. That is what we assert. Filed as its own todo; when it is fixed, this
-# step fails and sends whoever fixed it here to read this comment.
+# HOME is sandboxed here, so NO unit file exists at all: every routable var must
+# come back unknown. This is the exact case that exposed the bug.
 ROUTES=$(curl -fsS --max-time 10 "$BASE/api/forge/routes")
 [ "$(jq -r 'type' <<<"$ROUTES")" = "array" ] || fail "/api/forge/routes is not an array: $ROUTES"
-FORGE_URL=$(jq -r '.[] | select(.service == "kayushkin" and .env_var == "FORGE_API_URL") | .value' <<<"$ROUTES")
-[ "$FORGE_URL" = "http://127.0.0.1:8150" ] || fail "the fabricated-fallback pin has changed (expected the hardcoded http://127.0.0.1:8150, got '$FORGE_URL'). If you just made getRoutes() stop inventing values for undeclared vars: GOOD — that is the fix. Update this assertion to expect an empty value."
-echo "    routes: $(jq -r 'length' <<<"$ROUTES") entries, values FABRICATED from the hardcoded table (no unit file exists in the sandbox) — known bug, pinned"
+
+PROD_COUNT=$(jq -r '[.[] | select(.env == "prod")] | length' <<<"$ROUTES")
+[ "$PROD_COUNT" -gt 0 ] || fail "no prod routes reported at all: $ROUTES"
+
+# Not one prod route may carry a value: there is no unit here to have read it from.
+INVENTED=$(jq -r '[.[] | select(.env == "prod" and .value != "")] | length' <<<"$ROUTES")
+[ "$INVENTED" = "0" ] || fail "$INVENTED prod route(s) reported a value with NO unit file on disk to read it from — getRoutes is inventing values again (the hardcoded fallback table is back): $(jq -c '[.[] | select(.env == "prod" and .value != "")]' <<<"$ROUTES")"
+
+# ...and none may claim the unit declared it.
+CLAIMED=$(jq -r '[.[] | select(.env == "prod" and .declared == true)] | length' <<<"$ROUTES")
+[ "$CLAIMED" = "0" ] || fail "$CLAIMED prod route(s) reported declared=true with no unit file on disk"
+
+# The read error must be surfaced, not swallowed. Without this, a missing unit is
+# indistinguishable from a unit that declares nothing — which is what let the
+# fallback table hide behind an empty map in the first place.
+SILENT=$(jq -r '[.[] | select(.env == "prod" and (.source_error // "") == "")] | length' <<<"$ROUTES")
+[ "$SILENT" = "0" ] || fail "$SILENT prod route(s) reported no source_error, but their unit file does not exist — parseSystemdEnv is swallowing the read error again"
+
+# Every route must name the unit it consulted, or "declared=false" is unfalsifiable.
+NOSRC=$(jq -r '[.[] | select(.env == "prod" and (.source // "") == "")] | length' <<<"$ROUTES")
+[ "$NOSRC" = "0" ] || fail "$NOSRC prod route(s) did not name the unit file they were read from"
+
+echo "    routes: $(jq -r 'length' <<<"$ROUTES") entries, $PROD_COUNT prod — all reported unknown (empty value, declared=false, source_error set), no unit file in the sandbox"
 
 step "process still alive after serving every route"
 kill -0 "$SERVER_PID" 2>/dev/null || fail "forge api died while serving"
