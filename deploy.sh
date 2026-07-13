@@ -170,6 +170,14 @@ NO_SOURCE="$(jq '[.[] | select(.env == "prod" and .source == "")] | length' <<<"
 DECLARED="$(jq '[.[] | select(.env == "prod" and .declared)] | length' <<<"$ROUTES")"
 echo "    /api/forge/routes: $(jq 'length' <<<"$ROUTES") routes ($PROD_COUNT prod, $DECLARED declared by a unit, 0 fabricated)"
 
+# The vhost that publishes the preview slots forge hands out: N.dev.kayushkin.com
+# -> 127.0.0.1:9N00, with the WebSocket upgrade a live-reloading preview needs.
+# Slots with nothing running answer 502, which is their normal idle state and not
+# a deploy failure — install.sh asserts no REGRESSION per server_name, so an idle
+# slot does not fail this deploy while a slot that stops answering does.
+echo "==> Installing nginx vhost..."
+"$REPO_DIR/deploy/nginx/install.sh"
+
 printf '\n==> DEPLOYED — forge %s is live on %s\n' "$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo '(no git)')" "$BASE"
 # `[ -n "$BACKUP" ] && echo …` as the last line would exit 1 under `set -e` on a
 # first-ever install, failing a deploy that fully succeeded.
