@@ -39,7 +39,12 @@ func setupForge(t *testing.T) (*Forge, string) {
 	}
 	t.Cleanup(func() { f.Close() })
 
-	// Override workDir for tests
+	// workDir() reads HOME every time it is called, so pointing HOME at the test's
+	// own directory is what keeps a test's worktrees out of the developer's real
+	// ~/forge/work — which every test in this file was writing into, and which
+	// ListWorkspaces now reads. A comment here used to claim this was done.
+	t.Setenv("HOME", tmp)
+
 	return f, tmp
 }
 
@@ -338,7 +343,10 @@ func TestListWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	list := f.ListWorkspaces()
+	list, err := f.ListWorkspaces()
+	if err != nil {
+		t.Fatalf("ListWorkspaces: %v", err)
+	}
 	found := false
 	for _, w := range list {
 		if w.ID == ws.ID {
@@ -351,7 +359,10 @@ func TestListWorkspaces(t *testing.T) {
 
 	f.Cleanup(ws)
 
-	list = f.ListWorkspaces()
+	list, err = f.ListWorkspaces()
+	if err != nil {
+		t.Fatalf("ListWorkspaces after cleanup: %v", err)
+	}
 	for _, w := range list {
 		if w.ID == ws.ID {
 			t.Error("workspace still in list after cleanup")

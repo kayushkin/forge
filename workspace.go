@@ -1,7 +1,10 @@
 package forge
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,6 +146,17 @@ func (f *Forge) CreateWorkspace(agent string, projects []string) (*Workspace, er
 		Branch:  branch,
 		Status:  "created",
 	}
+
+	// The record is written before the workspace is handed out, and a workspace
+	// that cannot record itself is rolled back rather than returned. Everything
+	// decided above — which repository is primary, which branch the work goes
+	// on — exists only in this value until it is written down, and a caller that
+	// keeps it in memory loses all of it at its next restart while the worktrees
+	// stay on disk holding the work.
+	if err := saveWorkspaceRecord(ws); err != nil {
+		rollback(created)
+		return nil, err
+	}
 	return ws, nil
 }
 
@@ -175,7 +189,12 @@ func (f *Forge) CommitAll(ws *Workspace, message string) (map[string]CommitResul
 		results[name] = CommitResult{Hash: hash, Dirty: true}
 	}
 
-	ws.Status = "done"
+	// The results are returned even when the new status cannot be written: the
+	// commits named in them have already happened, and a caller that is handed
+	// nothing but an error would have no way to learn about them.
+	if err := recordWorkspaceStatus(ws, "done"); err != nil {
+		return results, err
+	}
 	return results, nil
 }
 
@@ -230,7 +249,13 @@ func (f *Forge) MergeToMain(ws *Workspace) map[string]MergeResult {
 		results[name] = MergeResult{Status: "ok"}
 	}
 
-	ws.Status = "merged"
+	// MergeToMain reports per-repository results and has nowhere to put an error
+	// about the workspace as a whole, so a record that cannot be updated is
+	// logged here rather than dropped. It is not fatal: the merge itself has
+	// already happened, and the caller cleans a merged workspace up.
+	if err := recordWorkspaceStatus(ws, "merged"); err != nil {
+		log.Printf("[forge] %v", err)
+	}
 	return results
 }
 
@@ -312,57 +337,50 @@ func (f *Forge) ReopenWorkspace(ws *Workspace) error {
 	if ws.Status == "expired" {
 		return fmt.Errorf("cannot reopen expired workspace")
 	}
-	ws.Status = "working"
-	return nil
+	return recordWorkspaceStatus(ws, "working")
 }
 
-// ListWorkspaces scans ~/forge/work/ for active workspaces.
-func (f *Forge) ListWorkspaces() []*Workspace {
+// ListWorkspaces returns every workspace under ~/forge/work/, read from the
+// record each one wrote for itself.
+//
+// It used to reconstruct each workspace from the shape of its directory, which
+// cannot answer the two questions a workspace is asked: it took the primary
+// repository to be whichever name os.ReadDir returned first — alphabetical
+// order, not the project the workspace was created for — and filled the status
+// in with a constant. A caller acting on either was acting on a guess.
+//
+// A directory that cannot be read is reported and does not stop the listing:
+// one workspace created by an older forge, or half-deleted, must not hide every
+// other workspace on the host from a caller looking for work to merge. Callers
+// get both halves and are expected to say so.
+func (f *Forge) ListWorkspaces() ([]*Workspace, error) {
 	base := workDir()
 	entries, err := os.ReadDir(base)
+	if errors.Is(err, fs.ErrNotExist) {
+		// No workspace has ever been created on this host, which is not a fault.
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("read workspaces in %s: %w", base, err)
 	}
 
 	var result []*Workspace
+	var unreadable []string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		id := e.Name()
-		wsDir := filepath.Join(base, id)
-		branch := fmt.Sprintf("spawn/%s", id)
-
-		// Scan subdirs as repos
-		subs, err := os.ReadDir(wsDir)
+		ws, err := readWorkspaceRecord(filepath.Join(base, e.Name()))
 		if err != nil {
+			unreadable = append(unreadable, err.Error())
 			continue
 		}
-		repos := make(map[string]string)
-		var primary string
-		for _, s := range subs {
-			if !s.IsDir() {
-				continue
-			}
-			repos[s.Name()] = filepath.Join(wsDir, s.Name())
-			if primary == "" {
-				primary = s.Name()
-			}
-		}
-		if len(repos) == 0 {
-			continue
-		}
-
-		result = append(result, &Workspace{
-			ID:      id,
-			Repos:   repos,
-			Primary: primary,
-			BaseDir: wsDir,
-			Branch:  branch,
-			Status:  "created", // can't know real status from disk alone
-		})
+		result = append(result, ws)
 	}
-	return result
+	if len(unreadable) > 0 {
+		return result, fmt.Errorf("%d workspace directories could not be read: %s", len(unreadable), strings.Join(unreadable, "; "))
+	}
+	return result, nil
 }
 
 // parseConflicts extracts conflicting file names from rebase output.
