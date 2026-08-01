@@ -63,7 +63,7 @@ func registerProject(t *testing.T, f *Forge, name, repoPath string, poolSize int
 
 func TestCreateWorkspace_Single(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "myproject")
 	initBareRepo(t, repo)
@@ -93,7 +93,7 @@ func TestCreateWorkspace_Single(t *testing.T) {
 
 func TestCreateWorkspace_Multi(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo1 := filepath.Join(tmp, "repos", "proj1")
 	repo2 := filepath.Join(tmp, "repos", "proj2")
@@ -119,7 +119,7 @@ func TestCreateWorkspace_Multi(t *testing.T) {
 
 func TestCommitAll_DirtyAndClean(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "proj")
 	initBareRepo(t, repo)
@@ -160,7 +160,7 @@ func TestCommitAll_DirtyAndClean(t *testing.T) {
 
 func TestMergeToMain_CleanFF(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "proj")
 	initBareRepo(t, repo)
@@ -193,7 +193,7 @@ func TestMergeToMain_CleanFF(t *testing.T) {
 
 func TestMergeToMain_Conflict(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "proj")
 	initBareRepo(t, repo)
@@ -224,7 +224,7 @@ func TestMergeToMain_Conflict(t *testing.T) {
 
 func TestCleanup(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "proj")
 	initBareRepo(t, repo)
@@ -262,7 +262,7 @@ func TestCleanup(t *testing.T) {
 
 func TestConcurrencyLimit(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "proj")
 	initBareRepo(t, repo)
@@ -291,7 +291,7 @@ func TestConcurrencyLimit(t *testing.T) {
 
 func TestReopenWorkspace(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "proj")
 	initBareRepo(t, repo)
@@ -332,7 +332,7 @@ func TestReopenWorkspace(t *testing.T) {
 
 func TestListWorkspaces(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "proj")
 	initBareRepo(t, repo)

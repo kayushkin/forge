@@ -16,7 +16,7 @@ import (
 
 func TestAWorkspaceCanBeReadBackAfterTheProcessThatCreatedItIsGone(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	first := filepath.Join(tmp, "repos", "first")
 	second := filepath.Join(tmp, "repos", "second")
@@ -61,7 +61,7 @@ func TestAWorkspaceCanBeReadBackAfterTheProcessThatCreatedItIsGone(t *testing.T)
 
 func TestAWorkspaceStatusSurvivesTheProcessThatChangedIt(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "proj")
 	initBareRepo(t, repo)
@@ -101,7 +101,7 @@ func TestAWorkspaceStatusSurvivesTheProcessThatChangedIt(t *testing.T) {
 
 func TestAWorkspaceWithNoRecordIsRefusedRatherThanGuessedAt(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "proj")
 	initBareRepo(t, repo)
@@ -149,7 +149,7 @@ func TestAWorkspaceWithNoRecordIsRefusedRatherThanGuessedAt(t *testing.T) {
 
 func TestAWorkspaceThatCannotNameItsPrimaryRepositoryIsRefused(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "proj")
 	initBareRepo(t, repo)
@@ -181,7 +181,7 @@ func TestAWorkspaceThatCannotNameItsPrimaryRepositoryIsRefused(t *testing.T) {
 
 func TestAFailedRecordIsReportedRatherThanPassedOver(t *testing.T) {
 	f, tmp := setupForge(t)
-	ResetWorkspaceSemaphores()
+	ResetWorkspaceReservations()
 
 	repo := filepath.Join(tmp, "repos", "proj")
 	initBareRepo(t, repo)

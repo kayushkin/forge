@@ -37,17 +37,150 @@ type MergeResult struct {
 	Error     string
 }
 
-// workspaceSemaphores tracks in-memory concurrency limits per project.
+// A project's concurrency limit is counted from the workspaces on disk. The
+// only thing held in memory is the reservations of workspaces that are being
+// built right now and have not recorded themselves yet.
+//
+// The count used to live in a package-level map, and a count in memory is only
+// true for as long as the process holding it stays up. Worktrees outlive
+// processes: a restart handed a project its whole pool back while the
+// workspaces already checked out went on holding their directories, and a
+// later Cleanup of one of those then decremented a slot it had never taken,
+// eating the reservation of a workspace that was still live. Over a few
+// restarts the count could sit at zero with several worktrees open. The limit
+// is about directories, so directories are what is counted.
 var (
-	wsMu       sync.Mutex
-	wsSem      = map[string]int{} // project → current count
-	wsLimits   = map[string]int{} // project → max (from pool_size)
+	wsMu sync.Mutex
+	// project name → slots taken by workspaces that are mid-creation.
+	workspacesBeingCreated = map[string]int{}
+	// workspace base directory → being created by this process right now.
+	workspaceDirsBeingCreated = map[string]bool{}
 )
 
 // workDir returns the base directory for all workspaces.
 func workDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "forge", "work")
+}
+
+// countWorkspacesPerProject reports how many workspaces on disk hold a worktree
+// of each project.
+//
+// Workspaces this process is in the middle of creating are left out: their
+// worktrees may already be on disk while their record is not, and their slots
+// are counted separately by reserveWorkspaceSlots. Counting both would refuse a
+// project a slot it actually has.
+func countWorkspacesPerProject() map[string]int {
+	counts := map[string]int{}
+	base := workDir()
+	entries, err := os.ReadDir(base)
+	if errors.Is(err, fs.ErrNotExist) {
+		// No workspace has ever been created on this host, which is not a fault.
+		return counts
+	}
+	if err != nil {
+		// Every workspace on the host lives under this one directory. Failing to
+		// list it is not "no workspaces in use", and letting it read that way
+		// would lift every project's limit at once.
+		log.Printf("[forge] cannot list %s, so no existing workspace counts towards any project's limit: %v", base, err)
+		return counts
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(base, entry.Name())
+		if workspaceDirsBeingCreated[dir] {
+			continue
+		}
+		ws, err := readWorkspaceRecord(dir)
+		if err == nil {
+			for project := range ws.Repos {
+				counts[project]++
+			}
+			continue
+		}
+
+		// A workspace that cannot describe itself still holds its worktrees, so
+		// it still holds the slots those worktrees occupy. Which projects they
+		// belong to does not have to be recovered from the record: every
+		// repository is checked out into a subdirectory named after its project,
+		// and the record is a file precisely so that a scan of subdirectories
+		// passes over it. That layout is an observation. The primary repository
+		// and the status are decisions, which is why those are the two things
+		// the record exists to stop anyone guessing — and neither is needed to
+		// count a slot.
+		projects, listErr := repositoriesInWorkspaceDir(dir)
+		if listErr != nil {
+			log.Printf("[forge] the workspace at %s can be neither read (%v) nor listed (%v), so the worktrees it holds count towards no project's limit", dir, err, listErr)
+			continue
+		}
+		log.Printf("[forge] the workspace at %s has no usable record (%v); counting its %d checked-out repositories towards their limits by directory name", dir, err, len(projects))
+		for _, project := range projects {
+			counts[project]++
+		}
+	}
+	return counts
+}
+
+// repositoriesInWorkspaceDir names the projects checked out in a workspace
+// directory, by the subdirectory each one occupies.
+func repositoriesInWorkspaceDir(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var projects []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			projects = append(projects, entry.Name())
+		}
+	}
+	return projects, nil
+}
+
+// reserveWorkspaceSlots takes one slot per project for the workspace about to be
+// built at baseDir, or names the first project that has none left.
+//
+// The reservation is what stops two concurrent creations from both reading a
+// project as having one slot free and both taking it: the second workspace's
+// worktrees are not on disk yet, and its record is written later still.
+func reserveWorkspaceSlots(baseDir string, projects []string, limits map[string]int) error {
+	wsMu.Lock()
+	defer wsMu.Unlock()
+
+	inUse := countWorkspacesPerProject()
+	askedFor := map[string]int{}
+	for _, project := range projects {
+		held := inUse[project] + workspacesBeingCreated[project] + askedFor[project]
+		if held >= limits[project] {
+			return fmt.Errorf("concurrency limit reached for project %q (%d/%d)", project, held, limits[project])
+		}
+		askedFor[project]++
+	}
+
+	for _, project := range projects {
+		workspacesBeingCreated[project]++
+	}
+	workspaceDirsBeingCreated[baseDir] = true
+	return nil
+}
+
+// releaseWorkspaceSlots gives back the reservations taken for baseDir.
+//
+// It is called once the workspace has recorded itself, after which the disk
+// scan counts it, and again if creation fails. It is deliberately not called on
+// cleanup: a workspace releases its slots by ceasing to be on disk.
+func releaseWorkspaceSlots(baseDir string, projects []string) {
+	wsMu.Lock()
+	defer wsMu.Unlock()
+	for _, project := range projects {
+		if workspacesBeingCreated[project] > 0 {
+			workspacesBeingCreated[project]--
+		}
+	}
+	delete(workspaceDirsBeingCreated, baseDir)
 }
 
 // CreateWorkspace creates ephemeral worktrees for the given projects.
@@ -68,12 +201,11 @@ func (f *Forge) CreateWorkspace(agent string, projects []string) (*Workspace, er
 		defBranch string
 	}
 	var infos []projInfo
+	limits := map[string]int{}
 
-	wsMu.Lock()
 	for _, name := range projects {
 		p, err := f.GetProject(name)
 		if err != nil {
-			wsMu.Unlock()
 			return nil, fmt.Errorf("project %q: %w", name, err)
 		}
 
@@ -81,12 +213,7 @@ func (f *Forge) CreateWorkspace(agent string, projects []string) (*Workspace, er
 		if limit == 0 {
 			limit = 3
 		}
-		wsLimits[name] = limit
-
-		if wsSem[name] >= limit {
-			wsMu.Unlock()
-			return nil, fmt.Errorf("concurrency limit reached for project %q (%d/%d)", name, wsSem[name], limit)
-		}
+		limits[name] = limit
 
 		defBranch := p.DefaultBranch
 		if defBranch == "" {
@@ -94,11 +221,10 @@ func (f *Forge) CreateWorkspace(agent string, projects []string) (*Workspace, er
 		}
 		infos = append(infos, projInfo{name: name, repo: expandHome(p.BaseRepo), defBranch: defBranch})
 	}
-	// Reserve slots
-	for _, name := range projects {
-		wsSem[name]++
+
+	if err := reserveWorkspaceSlots(baseDir, projects, limits); err != nil {
+		return nil, err
 	}
-	wsMu.Unlock()
 
 	// Rollback helper
 	rollback := func(created []string) {
@@ -106,19 +232,11 @@ func (f *Forge) CreateWorkspace(agent string, projects []string) (*Workspace, er
 			exec.Command("git", "-C", wt, "worktree", "remove", "--force", wt).Run()
 		}
 		os.RemoveAll(baseDir)
-		wsMu.Lock()
-		for _, name := range projects {
-			wsSem[name]--
-		}
-		wsMu.Unlock()
+		releaseWorkspaceSlots(baseDir, projects)
 	}
 
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
-		wsMu.Lock()
-		for _, name := range projects {
-			wsSem[name]--
-		}
-		wsMu.Unlock()
+		releaseWorkspaceSlots(baseDir, projects)
 		return nil, fmt.Errorf("create workspace dir: %w", err)
 	}
 
@@ -157,6 +275,10 @@ func (f *Forge) CreateWorkspace(agent string, projects []string) (*Workspace, er
 		rollback(created)
 		return nil, err
 	}
+
+	// The record is on disk, so the workspace now counts towards its projects'
+	// limits on its own and the reservation standing in for it can go.
+	releaseWorkspaceSlots(baseDir, projects)
 	return ws, nil
 }
 
@@ -282,7 +404,12 @@ func (f *Forge) PushAll(ws *Workspace) map[string]error {
 	return results
 }
 
-// Cleanup removes worktrees, deletes branches, and releases semaphore.
+// Cleanup removes worktrees, deletes branches, and takes the workspace off disk.
+//
+// It releases no counter. Removing the directory is what frees the slots: they
+// were counted from the workspaces on disk, and this workspace is no longer one
+// of them. Decrementing here is what used to let a workspace created before a
+// restart give back a slot it had never taken, from a live workspace that had.
 func (f *Forge) Cleanup(ws *Workspace) error {
 	var errs []string
 
@@ -309,17 +436,8 @@ func (f *Forge) Cleanup(ws *Workspace) error {
 		}
 	}
 
-	// Remove workspace dir
+	// Remove workspace dir. This is also what returns its slots.
 	os.RemoveAll(ws.BaseDir)
-
-	// Release semaphore
-	wsMu.Lock()
-	for name := range ws.Repos {
-		if wsSem[name] > 0 {
-			wsSem[name]--
-		}
-	}
-	wsMu.Unlock()
 
 	ws.Status = "expired"
 
@@ -400,10 +518,14 @@ func parseConflicts(output string) []string {
 	return conflicts
 }
 
-// ResetWorkspaceSemaphores clears all semaphore state. Used for testing.
-func ResetWorkspaceSemaphores() {
+// ResetWorkspaceReservations forgets the workspaces this process has in flight.
+// Used by tests, which share the package-level state across cases.
+//
+// There is nothing else to reset: what a project has in use is read from disk,
+// so a test points HOME at its own directory and starts from an empty one.
+func ResetWorkspaceReservations() {
 	wsMu.Lock()
-	wsSem = map[string]int{}
-	wsLimits = map[string]int{}
+	workspacesBeingCreated = map[string]int{}
+	workspaceDirsBeingCreated = map[string]bool{}
 	wsMu.Unlock()
 }
