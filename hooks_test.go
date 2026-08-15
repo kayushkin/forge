@@ -118,6 +118,32 @@ func TestAWriteWithNoExtractablePathRecommendsNothing(t *testing.T) {
 	}
 }
 
+// The empty-path guard looks redundant — an empty path has base "." and none of
+// the default patterns match it — and against the defaults alone, removing the
+// guard changes nothing. It stops being redundant the moment a caller configures
+// a catch-all: filepath.Base("") is ".", and "*" matches ".". Without the guard,
+// a tool result carrying no path at all recommends a build, with the reason
+// "file changed: " and nothing after it.
+func TestAWriteWithNoPathIsStoppedByTheGuardNotByThePatternsFailingToMatch(t *testing.T) {
+	h := (&Forge{}).NewHook(HookConfig{
+		Project:       "p",
+		AutoBuild:     true,
+		AutoPreview:   true,
+		BuildPatterns: []string{"*"},
+	})
+
+	// Sanity: this hook really does match anything with a name.
+	if got := h.Evaluate("write_file", `{"file_path":"README.md"}`, "", false); got.Kind != "build" {
+		t.Fatalf("catch-all pattern recommended %q for README.md, want build", got.Kind)
+	}
+
+	if got := h.Evaluate("write_file", `{"content":"no path here"}`, "", false); got.Kind != "none" {
+		t.Errorf("recommended %q for an input with no path, want none — the empty-path guard is "+
+			"what stops this, and a catch-all pattern is what makes it load-bearing (reason was %q)",
+			got.Kind, got.Reason)
+	}
+}
+
 func TestAMatchingFileBuildsOnlyWhenAutoBuildIsOn(t *testing.T) {
 	on := (&Forge{}).NewHook(HookConfig{Project: "p", AutoBuild: true})
 	got := on.Evaluate("write_file", `{"file_path":"/repo/main.go"}`, "", false)
