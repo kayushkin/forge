@@ -162,7 +162,8 @@ ENTRY=$(jq -c --arg a "$AGENT" '.[] | select(.agent == $a and .action == "open")
 [ -n "$ENTRY" ] || fail "no open-action log entry for $AGENT in /api/forge/deploys: $DEPLOYS"
 [ "$(jq -r '.detail' <<<"$ENTRY")" = "change=$CHANGE" ] || fail "log entry detail != change=$CHANGE: $ENTRY"
 [ "$(jq -r '.slot' <<<"$ENTRY")" = "$SLOT" ] || fail "log entry slot != $SLOT: $ENTRY"
-# timestamp is unix seconds (api.go:847-865); 0 would mean the column never got written.
+# timestamp is unix seconds (api.go, getDeploys sets Timestamp from e.CreatedAt);
+# 0 would mean the column never got written.
 TS=$(jq -r '.timestamp' <<<"$ENTRY")
 [ "$TS" -gt 0 ] 2>/dev/null || fail "log entry has a zero/absent unix timestamp: $ENTRY"
 echo "    deploy log: slot=$SLOT agent=$AGENT action=open detail=change=$CHANGE ts=$TS"
